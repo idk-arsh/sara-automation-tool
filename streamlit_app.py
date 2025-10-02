@@ -13,7 +13,7 @@ import os
 # ---------- OpenAI Client ----------
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
-    api_key=os.getenv("OPENROUTER_API_KEY")
+    api_key=os.getenv("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")
 )
 
 # ---------- File Readers ----------
