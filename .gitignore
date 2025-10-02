@@ -1,1 +1,5 @@
 .env
+*.env
+secrets.toml
+temp/
+__pycache__/
