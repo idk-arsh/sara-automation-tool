@@ -161,7 +161,7 @@ def extract_task(text: str) -> Dict[str, List[Dict[str, str]]]:
 
     Return *only* the JSON object. Do not include any additional text, notes, or explanations outside the JSON.
     Document:
-    {text[:1000]}  # Limit to first 1000 characters for stability
+    {text[:]}  # Limit to first 1000 characters for stability
     """
 
     try:
