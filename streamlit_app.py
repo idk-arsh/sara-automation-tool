@@ -154,7 +154,7 @@ def extract_task(text: str) -> Dict[str, List[Dict[str, str]]]:
 
     try:
         response = client.chat.completions.create(
-            model="alibaba/tongyi-deepresearch-30b-a3b:free",
+            model="z-ai/glm-4.5-air:free",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7
         )
