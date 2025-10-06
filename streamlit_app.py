@@ -172,12 +172,10 @@ def extract_task(text: str) -> Dict[str, List[Dict[str, str]]]:
         )
         content = response.choices[0].message.content.strip()
         # Log raw response for debugging
-        st.write(f"Raw OpenAI Response: {content}")
 
         # Extract JSON using brace counting
         json_content = extract_json(content)
         # Log extracted JSON for debugging
-        st.write(f"Extracted JSON Content: {json_content}")
 
         try:
             result = json.loads(json_content)
