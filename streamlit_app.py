@@ -99,6 +99,8 @@ def chunk_docx(file_path: Path | io.BytesIO, max_words=5000) -> List[str]:
     return chunks
 
 # ---------- OpenAI Extraction ----------
+import re
+
 def extract_task(text: str) -> Dict[str, List[Dict[str, str]]]:
     prompt = f"""
     You are an expert proposal analyst and technical project planner. 
@@ -147,7 +149,7 @@ def extract_task(text: str) -> Dict[str, List[Dict[str, str]]]:
     If information is missing, use defaults as specified.
 
     Document:
-    {text}
+    {text[:1000]}  # Limit to first 1000 characters for stability
     """
 
     try:
@@ -157,18 +159,29 @@ def extract_task(text: str) -> Dict[str, List[Dict[str, str]]]:
             temperature=0.7
         )
         content = response.choices[0].message.content.strip()
+        # Log raw response for debugging
+        st.write(f"Raw OpenAI Response: {content}")
+
+        # Extract JSON portion using regex
+        json_match = re.match(r'\{[\s\S]*?\}(?=\s*(?:Key Implementation Notes|$))', content)
+        if json_match:
+            json_content = json_match.group(0)
+        else:
+            json_content = content  # Fallback to original content if no match
+
+        # Log extracted JSON for debugging
+        st.write(f"Extracted JSON Content: {json_content}")
+
         try:
-            result = json.loads(content)
-            # Filter out tasks and deliverables with "Unspecified Task" as Parent Task
+            result = json.loads(json_content)
+            # Filter out tasks and deliverables with "Unspecified Task"
             result["Tasks"] = [task for task in result.get("Tasks", []) if task.get("Parent Task") != "Unspecified Task"]
             result["Deliverables"] = [deliverable for deliverable in result.get("Deliverables", []) if deliverable.get("Parent Task") != "Unspecified Task"]
             return result
-        except json.JSONDecodeError:
-            st.error("Could not parse JSON response from OpenAI")
-            return {
-                "Tasks": [],
-                "Deliverables": []
-            }
+        except json.JSONDecodeError as json_error:
+            st.error(f"Could not parse JSON response from OpenAI: {json_error}")
+            st.write(f"Failed JSON Content: {json_content}")
+            return {"Tasks": [], "Deliverables": []}
     except Exception as e:
         st.error(f"Error during OpenAI extraction: {e}")
         return {"Tasks": [], "Deliverables": []}
