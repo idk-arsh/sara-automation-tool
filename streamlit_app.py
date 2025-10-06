@@ -152,7 +152,7 @@ def extract_task(text: str) -> Dict[str, List[Dict[str, str]]]:
 
     try:
         response = client.chat.completions.create(
-            model="deepseek/deepseek-chat-v3.1:free",
+            model="alibaba/tongyi-deepresearch-30b-a3b:free",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7
         )
@@ -226,67 +226,119 @@ def process_file(file_path: Path | io.BytesIO, file_extension: str) -> Dict[str,
 
 # ---------- Streamlit App ----------
 st.title("Sara: Software Automation for Requirement Analysis")
-st.write("Upload a solicitation document (TXT, PDF, or DOCX) to extract tasks and deliverables.")
+st.write("Upload one or more solicitation documents (TXT, PDF, or DOCX) to extract tasks and deliverables.")
 
-uploaded_file = st.file_uploader("Choose a file", type=["txt", "pdf", "docx"])
+# Allow multiple file uploads
+uploaded_files = st.file_uploader("Choose files", type=["txt", "pdf", "docx"], accept_multiple_files=True)
 
-if uploaded_file is not None:
-    # Save uploaded file temporarily
+if uploaded_files:
     temp_dir = Path("temp")
     temp_dir.mkdir(exist_ok=True)
-    file_extension = f".{uploaded_file.name.split('.')[-1]}"
-    temp_file_path = temp_dir / uploaded_file.name
-    with open(temp_file_path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
-
-    st.write(f"Processing {uploaded_file.name}...")
+    all_tasks = []
+    all_deliverables = []
     start_time = time.time()
 
-    # Process the file
-    extracted = process_file(temp_file_path, file_extension)
+    # Process each uploaded file
+    for uploaded_file in uploaded_files:
+        st.write(f"Processing {uploaded_file.name}...")
+        file_extension = f".{uploaded_file.name.split('.')[-1]}"
+        temp_file_path = temp_dir / uploaded_file.name
 
-    # Display results
-    if extracted["Tasks"]:
-        st.subheader("Extracted Tasks")
-        tasks_df = pd.DataFrame(extracted["Tasks"])
-        st.dataframe(tasks_df, use_container_width=True)
+        # Save uploaded file temporarily
+        with open(temp_file_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
 
-        # Provide download button for tasks
-        tasks_excel = io.BytesIO()
-        tasks_df.to_excel(tasks_excel, index=False)
-        tasks_excel.seek(0)
-        st.download_button(
-            label="Download Tasks as Excel",
-            data=tasks_excel,
-            file_name=f"{uploaded_file.name.split('.')[0]}_tasks.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-    else:
-        st.warning("No tasks extracted.")
+        # Process the file
+        extracted = process_file(temp_file_path, file_extension)
 
-    if extracted["Deliverables"]:
-        st.subheader("Extracted Deliverables")
-        deliverables_df = pd.DataFrame(extracted["Deliverables"])
-        st.dataframe(deliverables_df, use_container_width=True)
+        # Add file name to results for traceability
+        for task in extracted["Tasks"]:
+            task["Source File"] = uploaded_file.name
+        for deliverable in extracted["Deliverables"]:
+            deliverable["Source File"] = uploaded_file.name
 
-        # Provide download button for deliverables
-        deliverables_excel = io.BytesIO()
-        deliverables_df.to_excel(deliverables_excel, index=False)
-        deliverables_excel.seek(0)
-        st.download_button(
-            label="Download Deliverables as Excel",
-            data=deliverables_excel,
-            file_name=f"{uploaded_file.name.split('.')[0]}_deliverables.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-    else:
-        st.warning("No deliverables extracted.")
+        # Append to aggregated results
+        all_tasks.extend(extracted["Tasks"])
+        all_deliverables.extend(extracted["Deliverables"])
 
-    # Clean up temporary file
-    os.remove(temp_file_path)
+        # Display results for this file
+        st.subheader(f"Results for {uploaded_file.name}")
+        if extracted["Tasks"]:
+            st.write("**Extracted Tasks**")
+            tasks_df = pd.DataFrame(extracted["Tasks"])
+            st.dataframe(tasks_df, use_container_width=True)
+
+            # Provide download button for tasks (per file)
+            tasks_excel = io.BytesIO()
+            tasks_df.to_excel(tasks_excel, index=False)
+            tasks_excel.seek(0)
+            st.download_button(
+                label=f"Download Tasks for {uploaded_file.name} as Excel",
+                data=tasks_excel,
+                file_name=f"{uploaded_file.name.split('.')[0]}_tasks.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        else:
+            st.warning(f"No tasks extracted from {uploaded_file.name}.")
+
+        if extracted["Deliverables"]:
+            st.write("**Extracted Deliverables**")
+            deliverables_df = pd.DataFrame(extracted["Deliverables"])
+            st.dataframe(deliverables_df, use_container_width=True)
+
+            # Provide download button for deliverables (per file)
+            deliverables_excel = io.BytesIO()
+            deliverables_df.to_excel(deliverables_excel, index=False)
+            deliverables_excel.seek(0)
+            st.download_button(
+                label=f"Download Deliverables for {uploaded_file.name} as Excel",
+                data=deliverables_excel,
+                file_name=f"{uploaded_file.name.split('.')[0]}_deliverables.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        else:
+            st.warning(f"No deliverables extracted from {uploaded_file.name}.")
+
+        # Clean up temporary file
+        os.remove(temp_file_path)
+
+    # Provide aggregated download option
+    if all_tasks or all_deliverables:
+        st.subheader("Aggregated Results Across All Files")
+        if all_tasks:
+            st.write("**All Extracted Tasks**")
+            all_tasks_df = pd.DataFrame(all_tasks)
+            st.dataframe(all_tasks_df, use_container_width=True)
+
+            # Download aggregated tasks
+            tasks_excel = io.BytesIO()
+            all_tasks_df.to_excel(tasks_excel, index=False)
+            tasks_excel.seek(0)
+            st.download_button(
+                label="Download All Tasks as Excel",
+                data=tasks_excel,
+                file_name="all_tasks.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
+        if all_deliverables:
+            st.write("**All Extracted Deliverables**")
+            all_deliverables_df = pd.DataFrame(all_deliverables)
+            st.dataframe(all_deliverables_df, use_container_width=True)
+
+            # Download aggregated deliverables
+            deliverables_excel = io.BytesIO()
+            all_deliverables_df.to_excel(deliverables_excel, index=False)
+            deliverables_excel.seek(0)
+            st.download_button(
+                label="Download All Deliverables as Excel",
+                data=deliverables_excel,
+                file_name="all_deliverables.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 
     end_time = time.time()
     elapsed = round(end_time - start_time, 2)
-    st.success(f"Finished processing {uploaded_file.name} in {elapsed} seconds.")
+    st.success(f"Finished processing {len(uploaded_files)} file(s) in {elapsed} seconds.")
 else:
-    st.info("Please upload a file to begin processing.")
+    st.info("Please upload one or more files to begin processing.")
