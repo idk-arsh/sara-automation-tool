@@ -99,7 +99,23 @@ def chunk_docx(file_path: Path | io.BytesIO, max_words=5000) -> List[str]:
     return chunks
 
 # ---------- OpenAI Extraction ----------
-import re
+def extract_json(content: str) -> str:
+    brace_count = 0
+    start_idx = None
+    json_content = ""
+    
+    for i, char in enumerate(content):
+        if char == '{':
+            if brace_count == 0:
+                start_idx = i
+            brace_count += 1
+        elif char == '}':
+            brace_count -= 1
+            if brace_count == 0 and start_idx is not None:
+                json_content = content[start_idx:i+1]
+                break
+    
+    return json_content or content  # Fallback to original content if no JSON found
 
 def extract_task(text: str) -> Dict[str, List[Dict[str, str]]]:
     prompt = f"""
@@ -143,18 +159,14 @@ def extract_task(text: str) -> Dict[str, List[Dict[str, str]]]:
       ]
     }}
 
-    Consolidate duplicated tasks (e.g., combine O&M general and transfer sessions).
-    If a task or deliverable does not clearly align with a major task, assign it to 'Unspecified Task' as a fallback.
-    If no major tasks are identified, use 'Unspecified Task' as the default Parent Task.
-    If information is missing, use defaults as specified.
-
+    Return *only* the JSON object. Do not include any additional text, notes, or explanations outside the JSON.
     Document:
     {text[:1000]}  # Limit to first 1000 characters for stability
     """
 
     try:
         response = client.chat.completions.create(
-            model="z-ai/glm-4.5-air:free",
+            model="alibaba/tongyi-deepresearch-30b-a3b:free",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7
         )
@@ -162,13 +174,8 @@ def extract_task(text: str) -> Dict[str, List[Dict[str, str]]]:
         # Log raw response for debugging
         st.write(f"Raw OpenAI Response: {content}")
 
-        # Extract JSON portion using regex
-        json_match = re.match(r'\{[\s\S]*?\}(?=\s*(?:Key Implementation Notes|$))', content)
-        if json_match:
-            json_content = json_match.group(0)
-        else:
-            json_content = content  # Fallback to original content if no match
-
+        # Extract JSON using brace counting
+        json_content = extract_json(content)
         # Log extracted JSON for debugging
         st.write(f"Extracted JSON Content: {json_content}")
 
