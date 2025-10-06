@@ -152,7 +152,7 @@ def extract_task(text: str) -> Dict[str, List[Dict[str, str]]]:
 
     try:
         response = client.chat.completions.create(
-            model="x-ai/grok-4-fast:free",
+            model="deepseek/deepseek-chat-v3.1:free",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7
         )
