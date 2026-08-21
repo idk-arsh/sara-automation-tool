@@ -307,7 +307,7 @@ Document:
         response = client.chat.completions.create(
 
             # ---------- UPDATED MODEL ----------
-            model="z-ai/glm-5.2:free",
+            model="stealth/ox-alpha",
 
             messages=[
                 {
