@@ -307,7 +307,7 @@ Document:
         response = client.chat.completions.create(
 
             # ---------- UPDATED MODEL ----------
-            model="google/gemma-4-31b-it:free",
+            model="google/gemma-4-26b-a4b-it:free",
 
             messages=[
                 {
