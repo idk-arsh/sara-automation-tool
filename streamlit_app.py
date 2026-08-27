@@ -307,7 +307,7 @@ Document:
         response = client.chat.completions.create(
 
             # ---------- UPDATED MODEL ----------
-            model="nvidia/nemotron-3.5-lightning:free",
+            model="liquid/lfm-2.5-2.6b:free",
 
             messages=[
                 {
