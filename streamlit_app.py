@@ -1,7 +1,7 @@
 import streamlit as st
 import time
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Any
 import pdfplumber
 import pandas as pd
 from openai import OpenAI
@@ -9,41 +9,125 @@ from docx import Document
 import json
 import io
 import os
+import re
 
 
 # ============================================================
-# OpenRouter Client
+# PAGE CONFIG
 # ============================================================
 
-client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=os.getenv("OPENAI_API_KEY")
+st.set_page_config(
+    page_title="Sara - Requirement Analysis",
+    page_icon="📄",
+    layout="wide"
 )
 
 
 # ============================================================
-# File Readers
+# OPENROUTER CONFIGURATION
 # ============================================================
 
-def read_file(file_path: Path | io.BytesIO, file_extension: str) -> str:
+OPENROUTER_API_KEY = os.getenv("OPENAI_API_KEY")
+
+if not OPENROUTER_API_KEY:
+    st.error(
+        "OPENAI_API_KEY environment variable is not configured. "
+        "Please add your OpenRouter API key."
+    )
+    st.stop()
+
+
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=OPENROUTER_API_KEY
+)
+
+
+# ============================================================
+# MODEL CONFIGURATION
+# ============================================================
+
+MODEL_NAME = "liquid/lfm-2.5-2.6b:free"
+
+# IMPORTANT:
+# Smaller chunks prevent the model from producing enormous JSON
+# responses that get truncated.
+PDF_MAX_PAGES = 8
+
+# DOCX chunk size
+DOCX_MAX_WORDS = 3000
+
+# Number of retries for failed AI extraction
+MAX_RETRIES = 3
+
+# If a response fails, split the chunk further
+MIN_SPLIT_CHARS = 3000
+
+# Maximum number of tasks/deliverables returned per AI call.
+# This keeps the response small enough for the model.
+MAX_TASKS_PER_RESPONSE = 30
+MAX_DELIVERABLES_PER_RESPONSE = 20
+
+
+# ============================================================
+# EMPTY RESULT
+# ============================================================
+
+def empty_result() -> Dict[str, List[Dict[str, str]]]:
+    return {
+        "Tasks": [],
+        "Deliverables": []
+    }
+
+
+# ============================================================
+# SAFE STRING
+# ============================================================
+
+def safe_string(value: Any) -> str:
+
+    if value is None:
+        return ""
+
+    if isinstance(value, str):
+        return value.strip()
+
+    return str(value).strip()
+
+
+# ============================================================
+# FILE READERS
+# ============================================================
+
+def read_file(
+    file_path: Path | io.BytesIO,
+    file_extension: str
+) -> str:
 
     try:
 
-        # ----------------------------------------------------
+        # --------------------------------------------------------
         # TXT
-        # ----------------------------------------------------
+        # --------------------------------------------------------
 
         if file_extension.lower() == ".txt":
 
             if isinstance(file_path, io.BytesIO):
-                return file_path.read().decode("utf-8")
+                file_path.seek(0)
+                return file_path.read().decode(
+                    "utf-8",
+                    errors="ignore"
+                )
 
-            return file_path.read_text(encoding="utf-8")
+            return file_path.read_text(
+                encoding="utf-8",
+                errors="ignore"
+            )
 
 
-        # ----------------------------------------------------
+        # --------------------------------------------------------
         # PDF
-        # ----------------------------------------------------
+        # --------------------------------------------------------
 
         elif file_extension.lower() == ".pdf":
 
@@ -51,17 +135,24 @@ def read_file(file_path: Path | io.BytesIO, file_extension: str) -> str:
 
             with pdfplumber.open(file_path) as pdf:
 
-                for page_num, page in enumerate(pdf.pages):
+                for page_num, page in enumerate(pdf.pages, 1):
 
-                    # Extract normal page text
-                    page_text = page.extract_text()
+                    # Normal text
+                    page_text = page.extract_text() or ""
 
                     if page_text:
-                        full_text += page_text + "\n"
+                        full_text += (
+                            f"\n[Page {page_num}]\n"
+                            f"{page_text}\n"
+                        )
 
+                    # Tables
+                    try:
 
-                    # Extract tables
-                    tables = page.extract_tables()
+                        tables = page.extract_tables()
+
+                    except Exception:
+                        tables = []
 
                     if tables:
 
@@ -69,78 +160,64 @@ def read_file(file_path: Path | io.BytesIO, file_extension: str) -> str:
 
                             for row in table or []:
 
-                                # Safely handle None cells
-                                if not row or not any(
-                                    cell and str(cell).strip()
-                                    for cell in row
-                                ):
+                                if not row:
                                     continue
 
-
-                                row_text = " ".join(
-                                    str(cell).strip().replace("\n", " ")
-                                    if cell is not None
-                                    else ""
+                                # Safely handle None cells
+                                cells = [
+                                    safe_string(cell)
                                     for cell in row
+                                ]
+
+                                if not any(cells):
+                                    continue
+
+                                row_text = " | ".join(
+                                    cell
+                                    for cell in cells
+                                    if cell
                                 )
 
-
-                                if row_text.startswith(
-                                    tuple(
-                                        f"{i}."
-                                        for i in range(1, 10)
-                                    )
-                                ):
-
+                                if row_text:
                                     full_text += (
-                                        f"\n{row_text}\n"
-                                    )
-
-                                else:
-
-                                    full_text += (
-                                        f" {row_text}\n"
+                                        f"{row_text}\n"
                                     )
 
 
+            # Normalize
             combined_text = (
                 full_text
-                .strip()
                 .replace("\r", "")
+                .replace("\x00", "")
+                .strip()
             )
-
-
-            # Remove non-ASCII characters
-            combined_text = (
-                combined_text
-                .encode("ascii", "ignore")
-                .decode("ascii")
-            )
-
 
             return combined_text
 
 
-        # ----------------------------------------------------
+        # --------------------------------------------------------
         # DOCX
-        # ----------------------------------------------------
+        # --------------------------------------------------------
 
         elif file_extension.lower() == ".docx":
 
             doc = Document(file_path)
 
-            return "\n".join(
-                [
-                    p.text
-                    for p in doc.paragraphs
-                    if p.text and p.text.strip()
-                ]
-            )
+            paragraphs = []
+
+            for paragraph in doc.paragraphs:
+
+                text = paragraph.text or ""
+
+                if text.strip():
+                    paragraphs.append(text.strip())
+
+            return "\n".join(paragraphs)
 
 
-        # ----------------------------------------------------
-        # Unsupported
-        # ----------------------------------------------------
+        # --------------------------------------------------------
+        # UNSUPPORTED
+        # --------------------------------------------------------
 
         else:
 
@@ -152,14 +229,15 @@ def read_file(file_path: Path | io.BytesIO, file_extension: str) -> str:
     except Exception as e:
 
         st.error(
-            f"Failed to read file: {type(e).__name__}: {e}"
+            f"Failed to read file: "
+            f"{type(e).__name__}: {e}"
         )
 
         return ""
 
 
 # ============================================================
-# Text Cleaning
+# TEXT CLEANING
 # ============================================================
 
 def clean_text(text: str) -> str:
@@ -167,28 +245,38 @@ def clean_text(text: str) -> str:
     if not text:
         return ""
 
+    text = text.replace("\x00", "")
+    text = text.replace("\r\n", "\n")
+    text = text.replace("\r", "\n")
+
+    # Normalize common dash characters
     text = text.replace("–", "-")
-    text = text.replace("Page ", "")
-    text = text.replace(" of ", "")
+    text = text.replace("—", "-")
+    text = text.replace("−", "-")
 
     lines = text.split("\n")
 
-    cleaned_lines = [
-        line.strip()
-        for line in lines
-        if line and line.strip()
-    ]
+    cleaned_lines = []
+
+    for line in lines:
+
+        line = line.strip()
+
+        if not line:
+            continue
+
+        cleaned_lines.append(line)
 
     return "\n".join(cleaned_lines)
 
 
 # ============================================================
-# PDF Chunking
+# PDF CHUNKING
 # ============================================================
 
 def chunk_pdf(
     file_path: Path | io.BytesIO,
-    max_pages=20
+    max_pages: int = PDF_MAX_PAGES
 ) -> List[str]:
 
     chunks = []
@@ -199,39 +287,82 @@ def chunk_pdf(
 
             total_pages = len(pdf.pages)
 
-            for i in range(
+            for start in range(
                 0,
                 total_pages,
                 max_pages
             ):
 
-                chunk_text = ""
+                end = min(
+                    start + max_pages,
+                    total_pages
+                )
 
-                for page in pdf.pages[
-                    i:i + max_pages
-                ]:
+                chunk_text_parts = []
+
+                for page_number in range(
+                    start,
+                    end
+                ):
+
+                    page = pdf.pages[page_number]
 
                     page_text = (
                         page.extract_text()
                         or ""
                     )
 
-                    chunk_text += (
-                        page_text + "\n"
-                    )
+                    if page_text.strip():
 
+                        chunk_text_parts.append(
+                            f"[Page {page_number + 1}]\n"
+                            f"{page_text}"
+                        )
 
-                cleaned_chunk = clean_text(
+                    # Extract tables
+                    try:
+                        tables = page.extract_tables()
+                    except Exception:
+                        tables = []
+
+                    if tables:
+
+                        for table in tables:
+
+                            for row in table or []:
+
+                                if not row:
+                                    continue
+
+                                cells = [
+                                    safe_string(cell)
+                                    for cell in row
+                                ]
+
+                                if not any(cells):
+                                    continue
+
+                                row_text = " | ".join(
+                                    cell
+                                    for cell in cells
+                                    if cell
+                                )
+
+                                if row_text:
+                                    chunk_text_parts.append(
+                                        row_text
+                                    )
+
+                chunk_text = "\n".join(
+                    chunk_text_parts
+                )
+
+                chunk_text = clean_text(
                     chunk_text
                 )
 
-
-                # Only add non-empty chunks
-                if cleaned_chunk:
-
-                    chunks.append(
-                        cleaned_chunk
-                    )
+                if chunk_text:
+                    chunks.append(chunk_text)
 
 
     except Exception as e:
@@ -241,65 +372,69 @@ def chunk_pdf(
             f"{type(e).__name__}: {e}"
         )
 
-
     return chunks
 
 
 # ============================================================
-# DOCX Chunking
+# DOCX CHUNKING
 # ============================================================
 
 def chunk_docx(
     file_path: Path | io.BytesIO,
-    max_words=5000
+    max_words: int = DOCX_MAX_WORDS
 ) -> List[str]:
 
     chunks = []
 
-    current = []
-
-    word_count = 0
+    current_paragraphs = []
+    current_words = 0
 
     try:
 
         doc = Document(file_path)
 
-        for para in doc.paragraphs:
+        for paragraph in doc.paragraphs:
 
-            para_text = para.text or ""
+            paragraph_text = (
+                paragraph.text or ""
+            ).strip()
 
-            words = para_text.split()
+            if not paragraph_text:
+                continue
 
+            words = paragraph_text.split()
 
             if (
-                word_count + len(words)
+                current_words + len(words)
                 > max_words
             ):
 
-                if current:
+                if current_paragraphs:
 
                     chunks.append(
                         clean_text(
-                            " ".join(current)
+                            "\n".join(
+                                current_paragraphs
+                            )
                         )
                     )
 
+                current_paragraphs = []
+                current_words = 0
 
-                current = []
+            current_paragraphs.append(
+                paragraph_text
+            )
 
-                word_count = 0
+            current_words += len(words)
 
-
-            current.extend(words)
-
-            word_count += len(words)
-
-
-        if current:
+        if current_paragraphs:
 
             chunks.append(
                 clean_text(
-                    " ".join(current)
+                    "\n".join(
+                        current_paragraphs
+                    )
                 )
             )
 
@@ -311,80 +446,167 @@ def chunk_docx(
             f"{type(e).__name__}: {e}"
         )
 
-
     return chunks
 
 
 # ============================================================
-# JSON Extraction
+# REMOVE MARKDOWN / CODE FENCES
 # ============================================================
 
-def extract_json(content: str) -> str:
+def clean_ai_content(content: Any) -> str:
+
+    if content is None:
+        return ""
+
+    # Handle list-based content returned by some models
+    if isinstance(content, list):
+
+        parts = []
+
+        for item in content:
+
+            if isinstance(item, dict):
+
+                if "text" in item:
+                    parts.append(
+                        safe_string(item["text"])
+                    )
+
+                elif item.get("type") == "text":
+                    parts.append(
+                        safe_string(
+                            item.get("text", "")
+                        )
+                    )
+
+            else:
+                parts.append(
+                    safe_string(item)
+                )
+
+        content = "\n".join(parts)
+
+    content = safe_string(content)
 
     if not content:
         return ""
 
-    brace_count = 0
+    # Remove Markdown fences
+    content = re.sub(
+        r"^\s*```(?:json|python)?\s*",
+        "",
+        content,
+        flags=re.IGNORECASE
+    )
 
-    start_idx = None
+    content = re.sub(
+        r"\s*```\s*$",
+        "",
+        content
+    )
 
-    json_content = ""
+    # Remove accidental leading text before JSON
+    first_brace = content.find("{")
+
+    if first_brace > 0:
+        content = content[first_brace:]
+
+    return content.strip()
 
 
-    for i, char in enumerate(content):
+# ============================================================
+# EXTRACT COMPLETE JSON OBJECT
+# ============================================================
+
+def extract_json_object(content: str) -> str:
+
+    content = clean_ai_content(content)
+
+    if not content:
+        return ""
+
+    start = content.find("{")
+
+    if start == -1:
+        return ""
+
+    # Properly track:
+    # - braces
+    # - strings
+    # - escaped quotes
+    #
+    # This is much safer than simply counting braces.
+
+    depth = 0
+    in_string = False
+    escape = False
+
+    for i in range(
+        start,
+        len(content)
+    ):
+
+        char = content[i]
+
+        if escape:
+
+            escape = False
+            continue
+
+        if char == "\\" and in_string:
+
+            escape = True
+            continue
+
+        if char == '"':
+
+            in_string = not in_string
+            continue
+
+        if in_string:
+            continue
 
         if char == "{":
 
-            if brace_count == 0:
-                start_idx = i
-
-            brace_count += 1
-
+            depth += 1
 
         elif char == "}":
 
-            brace_count -= 1
+            depth -= 1
 
-            if (
-                brace_count == 0
-                and start_idx is not None
-            ):
+            if depth == 0:
 
-                json_content = content[
-                    start_idx:i + 1
+                return content[
+                    start:i + 1
                 ]
 
-                break
-
-
-    return json_content or content
+    # JSON was probably truncated
+    return ""
 
 
 # ============================================================
-# Validate Extraction Result
+# NORMALIZE RESULT
 # ============================================================
 
-def validate_result(result):
+def validate_result(
+    result: Any
+) -> Dict[str, List[Dict[str, str]]]:
 
     if not isinstance(result, dict):
+        return empty_result()
 
-        return {
-            "Tasks": [],
-            "Deliverables": []
-        }
-
-
-    tasks = result.get("Tasks", [])
+    tasks = result.get(
+        "Tasks",
+        []
+    )
 
     deliverables = result.get(
         "Deliverables",
         []
     )
 
-
     if not isinstance(tasks, list):
         tasks = []
-
 
     if not isinstance(
         deliverables,
@@ -393,6 +615,10 @@ def validate_result(result):
         deliverables = []
 
 
+    # --------------------------------------------------------
+    # Normalize Tasks
+    # --------------------------------------------------------
+
     cleaned_tasks = []
 
     for task in tasks:
@@ -400,8 +626,50 @@ def validate_result(result):
         if not isinstance(task, dict):
             continue
 
-        cleaned_tasks.append(task)
+        cleaned_task = {
+            "Task": safe_string(
+                task.get("Task", "")
+            ),
+            "Parent Task": safe_string(
+                task.get("Parent Task", "")
+            ),
+            "Methodology": safe_string(
+                task.get("Methodology", "")
+            ),
+            "Tools & Technologies": safe_string(
+                task.get(
+                    "Tools & Technologies",
+                    ""
+                )
+            ),
+            "Task Summary": safe_string(
+                task.get("Task Summary", "")
+            )
+        }
 
+        # Don't add completely empty rows
+        if not (
+            cleaned_task["Task"]
+            or cleaned_task["Parent Task"]
+        ):
+            continue
+
+        # Remove accidental placeholder
+        if (
+            cleaned_task["Parent Task"]
+            .lower()
+            == "unspecified task"
+        ):
+            continue
+
+        cleaned_tasks.append(
+            cleaned_task
+        )
+
+
+    # --------------------------------------------------------
+    # Normalize Deliverables
+    # --------------------------------------------------------
 
     cleaned_deliverables = []
 
@@ -413,8 +681,47 @@ def validate_result(result):
         ):
             continue
 
+        cleaned_deliverable = {
+            "Deliverable": safe_string(
+                deliverable.get(
+                    "Deliverable",
+                    ""
+                )
+            ),
+            "Parent Task": safe_string(
+                deliverable.get(
+                    "Parent Task",
+                    ""
+                )
+            ),
+            "Description": safe_string(
+                deliverable.get(
+                    "Description",
+                    ""
+                )
+            )
+        }
+
+        if not (
+            cleaned_deliverable[
+                "Deliverable"
+            ]
+            or cleaned_deliverable[
+                "Parent Task"
+            ]
+        ):
+            continue
+
+        if (
+            cleaned_deliverable[
+                "Parent Task"
+            ].lower()
+            == "unspecified task"
+        ):
+            continue
+
         cleaned_deliverables.append(
-            deliverable
+            cleaned_deliverable
         )
 
 
@@ -425,398 +732,659 @@ def validate_result(result):
 
 
 # ============================================================
-# AI Extraction
+# PARSE AI JSON
 # ============================================================
 
-def extract_task(
-    text: str
+def parse_ai_json(
+    content: Any
 ) -> Dict[str, List[Dict[str, str]]]:
 
-    # --------------------------------------------------------
-    # Protect against empty chunks
-    # --------------------------------------------------------
+    cleaned_content = clean_ai_content(
+        content
+    )
 
-    if not text or not text.strip():
+    if not cleaned_content:
+        return empty_result()
 
-        st.warning(
-            "Skipping empty document chunk."
+    # First attempt: entire response
+    try:
+
+        result = json.loads(
+            cleaned_content
         )
 
-        return {
-            "Tasks": [],
-            "Deliverables": []
-        }
+        return validate_result(
+            result
+        )
+
+    except json.JSONDecodeError:
+        pass
 
 
-    prompt = f"""
-You are an expert federal proposal analyst and
-technical project planner.
+    # Second attempt: locate complete object
+    json_content = extract_json_object(
+        cleaned_content
+    )
 
-Carefully review the solicitation document and produce
-structured JSON output.
+    if not json_content:
+        return empty_result()
 
-First, identify the major task headings exactly as they
-appear in the document, including section headings,
-task titles, numbered tasks, or major work areas.
+    try:
 
-Use these exact task names as "Parent Task" values.
+        result = json.loads(
+            json_content
+        )
 
-Do NOT invent or infer major task names that are not
-present in the source document.
+        return validate_result(
+            result
+        )
 
-For each subtask under these major tasks, provide:
+    except json.JSONDecodeError:
+        return empty_result()
 
-- "Task": Subtask name or description, focusing on
-  technical tasks and compliance requirements.
 
-- "Parent Task": One of the major tasks identified,
-  using the exact wording from the document.
+# ============================================================
+# AI PROMPT
+# ============================================================
 
-- "Methodology": Methodology for accomplishing the task.
-  If the solicitation does not specify a methodology,
-  use "Agile (ADLC) / Secure SDLC".
+def build_prompt(text: str) -> str:
 
-- "Tools & Technologies": Tools, platforms, standards,
-  technologies, frameworks, and compliance standards
-  explicitly identified or reasonably required by the
-  solicitation.
+    return f"""
+You are an expert federal proposal analyst.
 
-- "Task Summary": 2-3 sentences explaining the scope,
-  objective, and expected outcome of the task.
+Analyze ONLY the solicitation text provided below.
 
-For project management deliverables such as PMP,
-Integrated Master Schedule, Risk Management Plan,
-Configuration Management Plan, Quality Assurance Plan,
-etc., create a separate "Deliverables" list.
+Extract technical tasks, compliance activities, and explicit deliverables.
 
-Each deliverable must contain:
+IMPORTANT:
+Return ONLY valid JSON.
+Do not return Markdown.
+Do not use ```json.
+Do not return Python.
+Do not explain anything.
 
-- "Deliverable": Name or description.
-- "Parent Task": Associated major task, using the exact
-  wording from the document.
-- "Description": Brief explanation of the deliverable.
+Keep the response concise.
 
-IMPORTANT RULES:
-
-1. Do not invent requirements.
-2. Do not create technologies that are not supported by
-   the solicitation.
-3. Preserve exact solicitation terminology for task and
-   parent-task names.
-4. Separate actual solicitation requirements from
-   methodology recommendations.
-5. Capture compliance requirements when explicitly stated.
-6. Capture technical standards, tools, platforms, and
-   technologies when stated.
-7. If a requirement is unclear, preserve the source
-   language instead of guessing.
-8. Return ONLY valid JSON.
-9. Do not include Markdown code fences.
-10. Do not include explanations outside the JSON object.
-11. Every field must contain a string value. Never return
-    null for any field.
-12. If information for a field is unavailable, return an
-    empty string instead of null.
-
-Return exactly this structure:
+Use this exact JSON structure:
 
 {{
   "Tasks": [
     {{
-      "Task": "...",
-      "Parent Task": "...",
-      "Methodology": "...",
-      "Tools & Technologies": "...",
-      "Task Summary": "..."
+      "Task": "task name",
+      "Parent Task": "exact major task or section heading from source",
+      "Methodology": "methodology explicitly stated in source, otherwise empty string",
+      "Tools & Technologies": "only tools, technologies, standards, platforms, or frameworks supported by source",
+      "Task Summary": "brief source-based summary"
     }}
   ],
   "Deliverables": [
     {{
-      "Deliverable": "...",
-      "Parent Task": "...",
-      "Description": "..."
+      "Deliverable": "deliverable name",
+      "Parent Task": "exact major task or section heading from source",
+      "Description": "brief source-based description"
     }}
   ]
 }}
 
-Document:
+RULES:
+
+1. Do not invent requirements.
+2. Do not invent technologies.
+3. Do not invent deliverables.
+4. Preserve source terminology.
+5. Use exact major section/task headings when available.
+6. Capture explicit compliance requirements.
+7. Capture explicit technical standards.
+8. Capture explicit tools and technologies.
+9. If methodology is not stated, use an empty string.
+10. Every field must contain a string.
+11. Never use null.
+12. Keep Task Summary concise.
+13. Do not duplicate the same task unnecessarily.
+14. Do not include commentary outside the JSON.
+15. Extract only information supported by the provided text.
+
+Limit the response to approximately:
+- 30 tasks maximum
+- 20 deliverables maximum
+
+SOLICITATION TEXT:
 
 {text}
 """
 
 
-    # ========================================================
-    # API CALL
-    # ========================================================
+# ============================================================
+# AI CALL
+# ============================================================
 
-    try:
+def call_ai(
+    text: str
+) -> Dict[str, List[Dict[str, str]]]:
 
-        response = client.chat.completions.create(
-
-            model="liquid/lfm-2.5-2.6b:free",
-
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-
-            temperature=0.2
-        )
+    if not text or not text.strip():
+        return empty_result()
 
 
-        # ----------------------------------------------------
-        # Check choices
-        # ----------------------------------------------------
-
-        if not response.choices:
-
-            st.error(
-                "AI model returned no choices."
-            )
-
-            st.write(
-                "Raw AI response:"
-            )
-
-            st.write(response)
-
-            return {
-                "Tasks": [],
-                "Deliverables": []
-            }
+    prompt = build_prompt(
+        text
+    )
 
 
-        # ----------------------------------------------------
-        # Get message
-        # ----------------------------------------------------
-
-        message = (
-            response.choices[0].message
-        )
-
-
-        # ----------------------------------------------------
-        # Get content safely
-        #
-        # THIS FIXES:
-        # 'NoneType' object has no attribute 'strip'
-        # ----------------------------------------------------
-
-        content = getattr(
-            message,
-            "content",
-            None
-        )
-
-
-        # ----------------------------------------------------
-        # Handle None content
-        # ----------------------------------------------------
-
-        if content is None:
-
-            st.error(
-                "AI model returned "
-                "None for message.content."
-            )
-
-            st.write(
-                "Raw AI message:"
-            )
-
-            st.write(message)
-
-            # Some OpenRouter models may return
-            # reasoning without final content
-            reasoning = getattr(
-                message,
-                "reasoning",
-                None
-            )
-
-            if reasoning:
-
-                st.warning(
-                    "The model returned reasoning "
-                    "but no final answer."
-                )
-
-
-            return {
-                "Tasks": [],
-                "Deliverables": []
-            }
-
-
-        # ----------------------------------------------------
-        # Convert safely to string
-        # ----------------------------------------------------
-
-        content = str(content).strip()
-
-
-        # ----------------------------------------------------
-        # Handle empty content
-        # ----------------------------------------------------
-
-        if not content:
-
-            st.error(
-                "AI model returned an empty response."
-            )
-
-            st.write(
-                "Raw AI response:"
-            )
-
-            st.write(response)
-
-            return {
-                "Tasks": [],
-                "Deliverables": []
-            }
-
-
-        # ----------------------------------------------------
-        # Extract JSON
-        # ----------------------------------------------------
-
-        json_content = extract_json(
-            content
-        )
-
-
-        if not json_content:
-
-            st.error(
-                "AI model did not return JSON."
-            )
-
-            st.write(
-                "Raw AI content:"
-            )
-
-            st.code(content)
-
-            return {
-                "Tasks": [],
-                "Deliverables": []
-            }
-
-
-        # ----------------------------------------------------
-        # Parse JSON
-        # ----------------------------------------------------
+    for attempt in range(
+        1,
+        MAX_RETRIES + 1
+    ):
 
         try:
 
-            result = json.loads(
-                json_content
-            )
+            # ------------------------------------------------
+            # First attempt with JSON response format
+            # ------------------------------------------------
+
+            try:
+
+                response = client.chat.completions.create(
+
+                    model=MODEL_NAME,
+
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "Return only valid JSON. "
+                                "Never return Markdown."
+                            )
+                        },
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ],
+
+                    temperature=0.0,
+
+                    # Prevent extremely large responses
+                    max_tokens=7000,
+
+                    # Ask OpenRouter/model for JSON
+                    response_format={
+                        "type": "json_object"
+                    }
+                )
 
 
-            # Validate structure
-            result = validate_result(
-                result
+            except Exception:
+
+                # Some free models/providers may not support
+                # response_format. Retry without it.
+
+                response = client.chat.completions.create(
+
+                    model=MODEL_NAME,
+
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "Return only valid JSON. "
+                                "Never return Markdown."
+                            )
+                        },
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ],
+
+                    temperature=0.0,
+
+                    max_tokens=7000
+                )
+
+
+            # ------------------------------------------------
+            # Validate choices
+            # ------------------------------------------------
+
+            if not response.choices:
+
+                st.warning(
+                    f"AI returned no choices "
+                    f"(attempt {attempt}/{MAX_RETRIES})."
+                )
+
+                continue
+
+
+            # ------------------------------------------------
+            # Get message
+            # ------------------------------------------------
+
+            message = response.choices[0].message
+
+
+            # ------------------------------------------------
+            # Get content safely
+            # ------------------------------------------------
+
+            content = getattr(
+                message,
+                "content",
+                None
             )
 
 
             # ------------------------------------------------
-            # Remove unspecified tasks
+            # Handle None
             # ------------------------------------------------
 
-            result["Tasks"] = [
+            if content is None:
 
-                task
+                st.warning(
+                    f"AI returned no final content "
+                    f"(attempt {attempt}/{MAX_RETRIES})."
+                )
 
-                for task in result["Tasks"]
+                # Check for refusal
+                refusal = getattr(
+                    message,
+                    "refusal",
+                    None
+                )
 
-                if str(
-                    task.get(
-                        "Parent Task",
-                        ""
+                if refusal:
+                    st.warning(
+                        f"Model refusal: {refusal}"
                     )
-                ).strip()
-                != "Unspecified Task"
 
-            ]
+                continue
 
 
-            # ------------------------------------------------
-            # Remove unspecified deliverables
-            # ------------------------------------------------
-
-            result["Deliverables"] = [
-
-                deliverable
-
-                for deliverable
-                in result["Deliverables"]
-
-                if str(
-                    deliverable.get(
-                        "Parent Task",
-                        ""
-                    )
-                ).strip()
-                != "Unspecified Task"
-
-            ]
-
-
-            return result
-
-
-        except json.JSONDecodeError as json_error:
-
-            st.error(
-                "Could not parse JSON response "
-                f"from AI model: {json_error}"
-            )
-
-
-            st.write(
-                "Failed JSON Content:"
-            )
-
-            st.code(
-                json_content
-            )
-
-
-            st.write(
-                "Original AI Content:"
-            )
-
-            st.code(
+            content = clean_ai_content(
                 content
             )
 
 
-            return {
-                "Tasks": [],
-                "Deliverables": []
-            }
+            if not content:
+
+                st.warning(
+                    f"AI returned empty content "
+                    f"(attempt {attempt}/{MAX_RETRIES})."
+                )
+
+                continue
 
 
-    except Exception as e:
+            # ------------------------------------------------
+            # Parse JSON
+            # ------------------------------------------------
 
-        st.error(
-            "Error during AI extraction: "
-            f"{type(e).__name__}: {e}"
-        )
+            result = parse_ai_json(
+                content
+            )
 
 
-        return {
-            "Tasks": [],
-            "Deliverables": []
-        }
+            if (
+                result["Tasks"]
+                or result["Deliverables"]
+            ):
+
+                return result
+
+
+            # ------------------------------------------------
+            # JSON parsing failed
+            # ------------------------------------------------
+
+            st.warning(
+                f"Could not parse AI JSON "
+                f"(attempt {attempt}/{MAX_RETRIES})."
+            )
+
+            # Show truncated diagnostic only
+            if attempt == MAX_RETRIES:
+
+                st.code(
+                    content[:5000],
+                    language="text"
+                )
+
+
+        except Exception as e:
+
+            st.warning(
+                f"AI extraction attempt "
+                f"{attempt}/{MAX_RETRIES} failed: "
+                f"{type(e).__name__}: {e}"
+            )
+
+            # Small delay before retry
+            time.sleep(
+                1.5 * attempt
+            )
+
+
+    return empty_result()
 
 
 # ============================================================
-# File Processing
+# RECURSIVE CHUNK EXTRACTION
+# ============================================================
+
+def extract_task(
+    text: str,
+    depth: int = 0
+) -> Dict[str, List[Dict[str, str]]]:
+
+    if not text or not text.strip():
+        return empty_result()
+
+
+    # --------------------------------------------------------
+    # Try normal extraction
+    # --------------------------------------------------------
+
+    result = call_ai(
+        text
+    )
+
+
+    if (
+        result["Tasks"]
+        or result["Deliverables"]
+    ):
+        return result
+
+
+    # --------------------------------------------------------
+    # If extraction fails, split the chunk
+    # --------------------------------------------------------
+
+    if len(text) <= MIN_SPLIT_CHARS:
+
+        st.warning(
+            "Unable to extract structured JSON "
+            "from this small chunk."
+        )
+
+        return empty_result()
+
+
+    # Prevent infinite recursion
+    if depth >= 3:
+
+        st.warning(
+            "Maximum chunk splitting depth reached."
+        )
+
+        return empty_result()
+
+
+    st.info(
+        "AI response could not be parsed. "
+        "Splitting this chunk into smaller sections "
+        "and retrying..."
+    )
+
+
+    # --------------------------------------------------------
+    # Split by paragraphs where possible
+    # --------------------------------------------------------
+
+    paragraphs = [
+        p.strip()
+        for p in re.split(
+            r"\n\s*\n",
+            text
+        )
+        if p.strip()
+    ]
+
+
+    if len(paragraphs) < 2:
+
+        midpoint = len(text) // 2
+
+        parts = [
+            text[:midpoint],
+            text[midpoint:]
+        ]
+
+    else:
+
+        midpoint = len(paragraphs) // 2
+
+        parts = [
+            "\n\n".join(
+                paragraphs[:midpoint]
+            ),
+            "\n\n".join(
+                paragraphs[midpoint:]
+            )
+        ]
+
+
+    combined = empty_result()
+
+
+    for part_number, part in enumerate(
+        parts,
+        1
+    ):
+
+        st.write(
+            f"Retrying smaller section "
+            f"{part_number}/{len(parts)}..."
+        )
+
+        part_result = extract_task(
+            part,
+            depth + 1
+        )
+
+        combined["Tasks"].extend(
+            part_result["Tasks"]
+        )
+
+        combined["Deliverables"].extend(
+            part_result["Deliverables"]
+        )
+
+
+    return combined
+
+
+# ============================================================
+# DEDUPLICATION
+# ============================================================
+
+def consolidate_results(
+    results: Dict[str, List[Dict[str, str]]]
+) -> Dict[str, List[Dict[str, str]]]:
+
+    # --------------------------------------------------------
+    # Tasks
+    # --------------------------------------------------------
+
+    task_map = {}
+
+    for task in results.get(
+        "Tasks",
+        []
+    ):
+
+        if not isinstance(task, dict):
+            continue
+
+        task_name = safe_string(
+            task.get("Task", "")
+        )
+
+        parent = safe_string(
+            task.get("Parent Task", "")
+        )
+
+        if not task_name:
+            continue
+
+        key = (
+            task_name.lower(),
+            parent.lower()
+        )
+
+        if key not in task_map:
+
+            task_map[key] = {
+                "Task": task_name,
+                "Parent Task": parent,
+                "Methodology": safe_string(
+                    task.get(
+                        "Methodology",
+                        ""
+                    )
+                ),
+                "Tools & Technologies": safe_string(
+                    task.get(
+                        "Tools & Technologies",
+                        ""
+                    )
+                ),
+                "Task Summary": safe_string(
+                    task.get(
+                        "Task Summary",
+                        ""
+                    )
+                )
+            }
+
+        else:
+
+            existing = task_map[key]
+
+            # Fill missing fields rather than
+            # creating duplicate rows.
+
+            for field in [
+                "Methodology",
+                "Tools & Technologies",
+                "Task Summary"
+            ]:
+
+                if (
+                    not existing[field]
+                    and safe_string(
+                        task.get(field, "")
+                    )
+                ):
+
+                    existing[field] = safe_string(
+                        task.get(field, "")
+                    )
+
+
+    # --------------------------------------------------------
+    # Deliverables
+    # --------------------------------------------------------
+
+    deliverable_map = {}
+
+    for deliverable in results.get(
+        "Deliverables",
+        []
+    ):
+
+        if not isinstance(
+            deliverable,
+            dict
+        ):
+            continue
+
+        name = safe_string(
+            deliverable.get(
+                "Deliverable",
+                ""
+            )
+        )
+
+        parent = safe_string(
+            deliverable.get(
+                "Parent Task",
+                ""
+            )
+        )
+
+        if not name:
+            continue
+
+        key = (
+            name.lower(),
+            parent.lower()
+        )
+
+        if key not in deliverable_map:
+
+            deliverable_map[key] = {
+                "Deliverable": name,
+                "Parent Task": parent,
+                "Description": safe_string(
+                    deliverable.get(
+                        "Description",
+                        ""
+                    )
+                )
+            }
+
+        else:
+
+            existing_description = (
+                deliverable_map[key][
+                    "Description"
+                ]
+            )
+
+            new_description = safe_string(
+                deliverable.get(
+                    "Description",
+                    ""
+                )
+            )
+
+            if (
+                new_description
+                and new_description
+                not in existing_description
+            ):
+
+                if existing_description:
+
+                    deliverable_map[key][
+                        "Description"
+                    ] = (
+                        existing_description
+                        + " "
+                        + new_description
+                    )
+
+                else:
+
+                    deliverable_map[key][
+                        "Description"
+                    ] = new_description
+
+
+    return {
+        "Tasks": list(
+            task_map.values()
+        ),
+        "Deliverables": list(
+            deliverable_map.values()
+        )
+    }
+
+
+# ============================================================
+# PROCESS FILE
 # ============================================================
 
 def process_file(
@@ -824,21 +1392,20 @@ def process_file(
     file_extension: str
 ) -> Dict[str, List[Dict[str, str]]]:
 
-    extracted_results = {
-        "Tasks": [],
-        "Deliverables": []
-    }
+    extracted_results = empty_result()
 
 
     # --------------------------------------------------------
     # Read file
     # --------------------------------------------------------
 
+    full_text = read_file(
+        file_path,
+        file_extension
+    )
+
     full_text = clean_text(
-        read_file(
-            file_path,
-            file_extension
-        )
+        full_text
     )
 
 
@@ -868,7 +1435,6 @@ def process_file(
                     pdf.pages
                 )
 
-
         except Exception as e:
 
             st.error(
@@ -879,20 +1445,19 @@ def process_file(
             return extracted_results
 
 
-        if total_pages > 40:
+        # ALWAYS use smaller chunks for PDFs
+        chunks = chunk_pdf(
+            file_path,
+            max_pages=PDF_MAX_PAGES
+        )
+
+        if total_pages > PDF_MAX_PAGES:
 
             st.info(
-                f"Splitting PDF into chunks "
-                f"({total_pages} pages)..."
+                f"PDF contains {total_pages} pages. "
+                f"Using {PDF_MAX_PAGES}-page chunks "
+                f"to prevent AI response truncation."
             )
-
-            chunks = chunk_pdf(
-                file_path
-            )
-
-        else:
-
-            chunks = [full_text]
 
 
     # --------------------------------------------------------
@@ -901,44 +1466,10 @@ def process_file(
 
     elif file_extension.lower() == ".docx":
 
-        try:
-
-            doc = Document(
-                file_path
-            )
-
-            total_words = sum(
-                len(
-                    (p.text or "").split()
-                )
-                for p in doc.paragraphs
-            )
-
-
-        except Exception as e:
-
-            st.error(
-                f"Could not inspect DOCX: "
-                f"{type(e).__name__}: {e}"
-            )
-
-            return extracted_results
-
-
-        if total_words > 20000:
-
-            st.info(
-                f"Splitting DOCX into chunks "
-                f"(~{total_words} words)..."
-            )
-
-            chunks = chunk_docx(
-                file_path
-            )
-
-        else:
-
-            chunks = [full_text]
+        chunks = chunk_docx(
+            file_path,
+            max_words=DOCX_MAX_WORDS
+        )
 
 
     # --------------------------------------------------------
@@ -947,7 +1478,58 @@ def process_file(
 
     else:
 
-        chunks = [full_text]
+        # Split very large TXT files too
+        if len(full_text) > 30000:
+
+            paragraphs = [
+                p.strip()
+                for p in re.split(
+                    r"\n\s*\n",
+                    full_text
+                )
+                if p.strip()
+            ]
+
+            chunks = []
+
+            current = []
+            current_length = 0
+
+            for paragraph in paragraphs:
+
+                if (
+                    current_length
+                    + len(paragraph)
+                    > 25000
+                    and current
+                ):
+
+                    chunks.append(
+                        "\n\n".join(current)
+                    )
+
+                    current = []
+                    current_length = 0
+
+                current.append(
+                    paragraph
+                )
+
+                current_length += len(
+                    paragraph
+                )
+
+            if current:
+
+                chunks.append(
+                    "\n\n".join(current)
+                )
+
+        else:
+
+            chunks = [
+                full_text
+            ]
 
 
     # --------------------------------------------------------
@@ -957,7 +1539,8 @@ def process_file(
     chunks = [
         chunk
         for chunk in chunks
-        if chunk and chunk.strip()
+        if chunk
+        and chunk.strip()
     ]
 
 
@@ -975,6 +1558,11 @@ def process_file(
     # Process chunks
     # --------------------------------------------------------
 
+    st.write(
+        f"Created {len(chunks)} extraction chunk(s)."
+    )
+
+
     for i, chunk in enumerate(
         chunks,
         1
@@ -985,13 +1573,10 @@ def process_file(
             f"{i}/{len(chunks)}..."
         )
 
-
         chunk_result = extract_task(
             chunk
         )
 
-
-        # Safely extend tasks
         extracted_results[
             "Tasks"
         ].extend(
@@ -1001,8 +1586,6 @@ def process_file(
             )
         )
 
-
-        # Safely extend deliverables
         extracted_results[
             "Deliverables"
         ].extend(
@@ -1013,200 +1596,12 @@ def process_file(
         )
 
 
-    # ========================================================
-    # Consolidate Tasks
-    # ========================================================
-
-    consolidated_tasks = {}
-
-
-    for task in extracted_results[
-        "Tasks"
-    ]:
-
-        if not isinstance(
-            task,
-            dict
-        ):
-            continue
-
-
-        task_key = (
-
-            str(
-                task.get(
-                    "Task",
-                    ""
-                )
-            ).strip(),
-
-            str(
-                task.get(
-                    "Parent Task",
-                    ""
-                )
-            ).strip()
-
-        )
-
-
-        if task_key not in consolidated_tasks:
-
-            consolidated_tasks[
-                task_key
-            ] = task
-
-        else:
-
-            existing_summary = str(
-                consolidated_tasks[
-                    task_key
-                ].get(
-                    "Task Summary",
-                    ""
-                )
-                or ""
-            ).strip()
-
-
-            new_summary = str(
-                task.get(
-                    "Task Summary",
-                    ""
-                )
-                or ""
-            ).strip()
-
-
-            if new_summary:
-
-                if existing_summary:
-
-                    consolidated_tasks[
-                        task_key
-                    ][
-                        "Task Summary"
-                    ] = (
-                        existing_summary
-                        + " "
-                        + new_summary
-                    )
-
-                else:
-
-                    consolidated_tasks[
-                        task_key
-                    ][
-                        "Task Summary"
-                    ] = new_summary
-
-
-    # ========================================================
-    # Consolidate Deliverables
-    # ========================================================
-
-    consolidated_deliverables = {}
-
-
-    for deliverable in extracted_results[
-        "Deliverables"
-    ]:
-
-        if not isinstance(
-            deliverable,
-            dict
-        ):
-            continue
-
-
-        deliv_key = (
-
-            str(
-                deliverable.get(
-                    "Deliverable",
-                    ""
-                )
-            ).strip(),
-
-            str(
-                deliverable.get(
-                    "Parent Task",
-                    ""
-                )
-            ).strip()
-
-        )
-
-
-        if (
-            deliv_key
-            not in consolidated_deliverables
-        ):
-
-            consolidated_deliverables[
-                deliv_key
-            ] = deliverable
-
-        else:
-
-            existing_description = str(
-                consolidated_deliverables[
-                    deliv_key
-                ].get(
-                    "Description",
-                    ""
-                )
-                or ""
-            ).strip()
-
-
-            new_description = str(
-                deliverable.get(
-                    "Description",
-                    ""
-                )
-                or ""
-            ).strip()
-
-
-            if new_description:
-
-                if existing_description:
-
-                    consolidated_deliverables[
-                        deliv_key
-                    ][
-                        "Description"
-                    ] = (
-                        existing_description
-                        + " "
-                        + new_description
-                    )
-
-                else:
-
-                    consolidated_deliverables[
-                        deliv_key
-                    ][
-                        "Description"
-                    ] = new_description
-
-
     # --------------------------------------------------------
-    # Convert dictionaries to lists
+    # Consolidate
     # --------------------------------------------------------
 
-    extracted_results[
-        "Tasks"
-    ] = list(
-        consolidated_tasks.values()
-    )
-
-
-    extracted_results[
-        "Deliverables"
-    ] = list(
-        consolidated_deliverables.values()
+    extracted_results = consolidate_results(
+        extracted_results
     )
 
 
@@ -1214,13 +1609,93 @@ def process_file(
 
 
 # ============================================================
-# Streamlit App
+# EXCEL CREATION
+# ============================================================
+
+def create_excel(
+    data: List[Dict[str, Any]]
+) -> io.BytesIO:
+
+    output = io.BytesIO()
+
+    if not data:
+
+        df = pd.DataFrame()
+
+    else:
+
+        df = pd.DataFrame(
+            data
+        )
+
+    with pd.ExcelWriter(
+        output,
+        engine="openpyxl"
+    ) as writer:
+
+        df.to_excel(
+            writer,
+            index=False,
+            sheet_name="Results"
+        )
+
+        worksheet = writer.sheets[
+            "Results"
+        ]
+
+        # Freeze header row
+        worksheet.freeze_panes = "A2"
+
+        # Autofilter
+        if not df.empty:
+
+            worksheet.auto_filter.ref = (
+                worksheet.dimensions
+            )
+
+        # Set readable column widths
+        for column_cells in worksheet.columns:
+
+            max_length = 0
+
+            column_letter = (
+                column_cells[0].column_letter
+            )
+
+            for cell in column_cells:
+
+                try:
+
+                    cell_length = len(
+                        str(cell.value)
+                    )
+
+                    if cell_length > max_length:
+                        max_length = cell_length
+
+                except Exception:
+                    pass
+
+            worksheet.column_dimensions[
+                column_letter
+            ].width = min(
+                max(max_length + 2, 12),
+                60
+            )
+
+
+    output.seek(0)
+
+    return output
+
+
+# ============================================================
+# STREAMLIT APP
 # ============================================================
 
 st.title(
     "Sara: Software Automation for Requirement Analysis"
 )
-
 
 st.write(
     "Upload one or more solicitation documents "
@@ -1229,7 +1704,36 @@ st.write(
 
 
 # ============================================================
-# File Upload
+# SETTINGS
+# ============================================================
+
+with st.expander(
+    "Extraction Settings",
+    expanded=False
+):
+
+    st.write(
+        f"**Model:** `{MODEL_NAME}`"
+    )
+
+    st.write(
+        f"**PDF chunk size:** "
+        f"{PDF_MAX_PAGES} pages"
+    )
+
+    st.write(
+        f"**Maximum retries:** "
+        f"{MAX_RETRIES}"
+    )
+
+    st.write(
+        "Smaller chunks are intentionally used to "
+        "prevent truncated JSON responses."
+    )
+
+
+# ============================================================
+# FILE UPLOAD
 # ============================================================
 
 uploaded_files = st.file_uploader(
@@ -1244,12 +1748,14 @@ uploaded_files = st.file_uploader(
 
 
 # ============================================================
-# Process Uploaded Files
+# PROCESS UPLOADED FILES
 # ============================================================
 
 if uploaded_files:
 
-    temp_dir = Path("temp")
+    temp_dir = Path(
+        "temp"
+    )
 
     temp_dir.mkdir(
         exist_ok=True
@@ -1257,7 +1763,6 @@ if uploaded_files:
 
 
     all_tasks = []
-
     all_deliverables = []
 
 
@@ -1265,27 +1770,32 @@ if uploaded_files:
 
 
     # ========================================================
-    # Process Each File
+    # PROCESS EACH FILE
     # ========================================================
 
     for uploaded_file in uploaded_files:
 
+        st.divider()
+
         st.write(
-            f"Processing {uploaded_file.name}..."
+            f"## Processing "
+            f"{uploaded_file.name}"
         )
 
 
         # ----------------------------------------------------
-        # File Extension
+        # Extension
         # ----------------------------------------------------
 
         file_extension = (
-            f".{uploaded_file.name.split('.')[-1]}"
+            Path(
+                uploaded_file.name
+            ).suffix.lower()
         )
 
 
         # ----------------------------------------------------
-        # Temporary File
+        # Temporary path
         # ----------------------------------------------------
 
         temp_file_path = (
@@ -1295,7 +1805,7 @@ if uploaded_files:
 
 
         # ----------------------------------------------------
-        # Save uploaded file temporarily
+        # Save upload
         # ----------------------------------------------------
 
         try:
@@ -1309,7 +1819,6 @@ if uploaded_files:
                     uploaded_file.getbuffer()
                 )
 
-
         except Exception as e:
 
             st.error(
@@ -1322,7 +1831,7 @@ if uploaded_files:
 
 
         # ----------------------------------------------------
-        # Process File
+        # Process
         # ----------------------------------------------------
 
         try:
@@ -1332,7 +1841,6 @@ if uploaded_files:
                 file_extension
             )
 
-
         except Exception as e:
 
             st.error(
@@ -1341,19 +1849,17 @@ if uploaded_files:
                 f"{type(e).__name__}: {e}"
             )
 
-            extracted = {
-                "Tasks": [],
-                "Deliverables": []
-            }
+            extracted = empty_result()
 
 
         # ----------------------------------------------------
-        # Add Source File to Tasks
+        # Add source file
         # ----------------------------------------------------
 
-        for task in extracted[
-            "Tasks"
-        ]:
+        for task in extracted.get(
+            "Tasks",
+            []
+        ):
 
             if isinstance(
                 task,
@@ -1365,13 +1871,10 @@ if uploaded_files:
                 ] = uploaded_file.name
 
 
-        # ----------------------------------------------------
-        # Add Source File to Deliverables
-        # ----------------------------------------------------
-
-        for deliverable in extracted[
-            "Deliverables"
-        ]:
+        for deliverable in extracted.get(
+            "Deliverables",
+            []
+        ):
 
             if isinstance(
                 deliverable,
@@ -1384,29 +1887,31 @@ if uploaded_files:
 
 
         # ----------------------------------------------------
-        # Aggregate Results
+        # Aggregate
         # ----------------------------------------------------
 
         all_tasks.extend(
-            extracted[
-                "Tasks"
-            ]
+            extracted.get(
+                "Tasks",
+                []
+            )
         )
 
-
         all_deliverables.extend(
-            extracted[
-                "Deliverables"
-            ]
+            extracted.get(
+                "Deliverables",
+                []
+            )
         )
 
 
         # ====================================================
-        # Display Results
+        # DISPLAY RESULTS
         # ====================================================
 
         st.subheader(
-            f"Results for {uploaded_file.name}"
+            f"Results for "
+            f"{uploaded_file.name}"
         )
 
 
@@ -1414,39 +1919,28 @@ if uploaded_files:
         # Tasks
         # ----------------------------------------------------
 
-        if extracted[
+        if extracted.get(
             "Tasks"
-        ]:
+        ):
 
             st.write(
-                "**Extracted Tasks**"
+                "### Extracted Tasks"
             )
-
 
             tasks_df = pd.DataFrame(
-                extracted[
-                    "Tasks"
-                ]
+                extracted["Tasks"]
             )
-
 
             st.dataframe(
                 tasks_df,
-                use_container_width=True
+                use_container_width=True,
+                hide_index=True
             )
 
 
-            # Excel download
-            tasks_excel = io.BytesIO()
-
-
-            tasks_df.to_excel(
-                tasks_excel,
-                index=False
+            tasks_excel = create_excel(
+                extracted["Tasks"]
             )
-
-
-            tasks_excel.seek(0)
 
 
             st.download_button(
@@ -1455,20 +1949,20 @@ if uploaded_files:
                     f"{uploaded_file.name} "
                     f"as Excel"
                 ),
-
                 data=tasks_excel,
-
                 file_name=(
-                    f"{uploaded_file.name.split('.')[0]}"
+                    f"{Path(uploaded_file.name).stem}"
                     "_tasks.xlsx"
                 ),
-
                 mime=(
                     "application/vnd.openxmlformats-"
                     "officedocument.spreadsheetml.sheet"
+                ),
+                key=(
+                    f"tasks_"
+                    f"{uploaded_file.name}"
                 )
             )
-
 
         else:
 
@@ -1482,39 +1976,30 @@ if uploaded_files:
         # Deliverables
         # ----------------------------------------------------
 
-        if extracted[
+        if extracted.get(
             "Deliverables"
-        ]:
+        ):
 
             st.write(
-                "**Extracted Deliverables**"
+                "### Extracted Deliverables"
+            )
+
+            deliverables_df = pd.DataFrame(
+                extracted["Deliverables"]
+            )
+
+            st.dataframe(
+                deliverables_df,
+                use_container_width=True,
+                hide_index=True
             )
 
 
-            deliverables_df = pd.DataFrame(
+            deliverables_excel = create_excel(
                 extracted[
                     "Deliverables"
                 ]
             )
-
-
-            st.dataframe(
-                deliverables_df,
-                use_container_width=True
-            )
-
-
-            # Excel download
-            deliverables_excel = io.BytesIO()
-
-
-            deliverables_df.to_excel(
-                deliverables_excel,
-                index=False
-            )
-
-
-            deliverables_excel.seek(0)
 
 
             st.download_button(
@@ -1523,17 +2008,18 @@ if uploaded_files:
                     f"{uploaded_file.name} "
                     f"as Excel"
                 ),
-
                 data=deliverables_excel,
-
                 file_name=(
-                    f"{uploaded_file.name.split('.')[0]}"
+                    f"{Path(uploaded_file.name).stem}"
                     "_deliverables.xlsx"
                 ),
-
                 mime=(
                     "application/vnd.openxmlformats-"
                     "officedocument.spreadsheetml.sheet"
+                ),
+                key=(
+                    f"deliverables_"
+                    f"{uploaded_file.name}"
                 )
             )
 
@@ -1547,7 +2033,7 @@ if uploaded_files:
 
 
         # ----------------------------------------------------
-        # Clean Up Temporary File
+        # Cleanup
         # ----------------------------------------------------
 
         try:
@@ -1557,12 +2043,11 @@ if uploaded_files:
             )
 
         except OSError:
-
             pass
 
 
     # ========================================================
-    # Aggregated Results
+    # AGGREGATED RESULTS
     # ========================================================
 
     if (
@@ -1570,7 +2055,9 @@ if uploaded_files:
         or all_deliverables
     ):
 
-        st.subheader(
+        st.divider()
+
+        st.header(
             "Aggregated Results Across All Files"
         )
 
@@ -1581,47 +2068,37 @@ if uploaded_files:
 
         if all_tasks:
 
-            st.write(
-                "**All Extracted Tasks**"
+            st.subheader(
+                "All Extracted Tasks"
             )
-
 
             all_tasks_df = pd.DataFrame(
                 all_tasks
             )
 
-
             st.dataframe(
                 all_tasks_df,
-                use_container_width=True
+                use_container_width=True,
+                hide_index=True
             )
 
 
-            tasks_excel = io.BytesIO()
-
-
-            all_tasks_df.to_excel(
-                tasks_excel,
-                index=False
+            all_tasks_excel = create_excel(
+                all_tasks
             )
-
-
-            tasks_excel.seek(0)
 
 
             st.download_button(
                 label=(
                     "Download All Tasks as Excel"
                 ),
-
-                data=tasks_excel,
-
+                data=all_tasks_excel,
                 file_name="all_tasks.xlsx",
-
                 mime=(
                     "application/vnd.openxmlformats-"
                     "officedocument.spreadsheetml.sheet"
-                )
+                ),
+                key="all_tasks_download"
             )
 
 
@@ -1631,32 +2108,24 @@ if uploaded_files:
 
         if all_deliverables:
 
-            st.write(
-                "**All Extracted Deliverables**"
+            st.subheader(
+                "All Extracted Deliverables"
             )
-
 
             all_deliverables_df = pd.DataFrame(
                 all_deliverables
             )
 
-
             st.dataframe(
                 all_deliverables_df,
-                use_container_width=True
+                use_container_width=True,
+                hide_index=True
             )
 
 
-            deliverables_excel = io.BytesIO()
-
-
-            all_deliverables_df.to_excel(
-                deliverables_excel,
-                index=False
+            all_deliverables_excel = create_excel(
+                all_deliverables
             )
-
-
-            deliverables_excel.seek(0)
 
 
             st.download_button(
@@ -1664,30 +2133,24 @@ if uploaded_files:
                     "Download All Deliverables "
                     "as Excel"
                 ),
-
-                data=deliverables_excel,
-
+                data=all_deliverables_excel,
                 file_name="all_deliverables.xlsx",
-
                 mime=(
                     "application/vnd.openxmlformats-"
                     "officedocument.spreadsheetml.sheet"
-                )
+                ),
+                key="all_deliverables_download"
             )
 
 
     # ========================================================
-    # Processing Time
+    # PROCESSING TIME
     # ========================================================
 
-    end_time = time.time()
-
-
     elapsed = round(
-        end_time - start_time,
+        time.time() - start_time,
         2
     )
-
 
     st.success(
         f"Finished processing "
