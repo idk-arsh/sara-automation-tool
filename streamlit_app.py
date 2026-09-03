@@ -389,7 +389,7 @@ Document:
 
         response = client.chat.completions.create(
 
-            model="liquid/lfm-2.5-2.6b:free",
+            model="inclusionai/ling-3.0-flash-fin:free",
 
             messages=[
                 {
