@@ -10,14 +10,14 @@ import json
 import io
 import os
 
----------- OpenRouter Client ----------
+
 
 client = OpenAI(
 base_url="https://openrouter.ai/api/v1",
 api_key=os.getenv("OPENAI_API_KEY")
 )
 
----------- File Readers ----------
+
 
 def read_file(file_path: Path | io.BytesIO, file_extension: str) -> str:
 try:
@@ -108,7 +108,7 @@ cleaned_lines = [
 
 return "\n".join(cleaned_lines)
 
----------- Chunking Helpers ----------
+
 
 def chunk_pdf(
 file_path: Path | io.BytesIO,
@@ -172,7 +172,7 @@ except Exception as e:
 
 return chunks
 
----------- JSON Extraction ----------
+
 
 def extract_json(content: str) -> str:
 
@@ -204,7 +204,7 @@ for i, char in enumerate(content):
 
 return json_content or content
 
----------- AI Extraction ----------
+
 
 def extract_task(
 text: str
@@ -389,7 +389,7 @@ except Exception as e:
         "Deliverables": []
     }
 
----------- File Processing ----------
+
 
 def process_file(
 file_path: Path | io.BytesIO,
@@ -561,7 +561,7 @@ extracted_results["Deliverables"] = list(
 
 return extracted_results
 
----------- Streamlit App ----------
+
 
 st.title(
 "Sara: Software Automation for Requirement Analysis"
@@ -572,7 +572,7 @@ st.write(
 "(TXT, PDF, or DOCX) to extract tasks and deliverables."
 )
 
----------- File Upload ----------
+
 
 uploaded_files = st.file_uploader(
 "Choose files",
