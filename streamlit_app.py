@@ -1,3 +1,4 @@
+```python
 import streamlit as st
 import time
 from pathlib import Path
@@ -11,207 +12,278 @@ import io
 import os
 
 
+# ============================================================
+# OpenRouter / OpenAI Client
+# ============================================================
 
 client = OpenAI(
-base_url="https://openrouter.ai/api/v1",
-api_key=os.getenv("OPENAI_API_KEY")
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.getenv("OPENAI_API_KEY")
 )
 
 
+# ============================================================
+# Read File
+# ============================================================
 
-def read_file(file_path: Path | io.BytesIO, file_extension: str) -> str:
-try:
-if file_extension.lower() == ".txt":
-if isinstance(file_path, io.BytesIO):
-return file_path.read().decode("utf-8")
-return file_path.read_text(encoding="utf-8")
+def read_file(
+    file_path: Path | io.BytesIO,
+    file_extension: str
+) -> str:
 
-    elif file_extension.lower() == ".pdf":
-        full_text = ""
+    try:
 
-        with pdfplumber.open(file_path) as pdf:
-            for page_num, page in enumerate(pdf.pages):
-                page_text = page.extract_text()
+        if file_extension.lower() == ".txt":
 
-                if page_text:
-                    full_text += page_text + "\n"
+            if isinstance(file_path, io.BytesIO):
+                return file_path.read().decode("utf-8")
 
-                tables = page.extract_tables()
+            return file_path.read_text(encoding="utf-8")
 
-                if tables:
-                    for table in tables:
-                        for row in table or []:
-                            if not row or not any(
-                                cell and cell.strip() for cell in row
-                            ):
-                                continue
+        elif file_extension.lower() == ".pdf":
 
-                            row_text = " ".join(
-                                cell.strip().replace("\n", " ")
-                                if cell
-                                else ""
-                                for cell in row
-                            )
+            full_text = ""
 
-                            if row_text.startswith(
-                                tuple(f"{i}." for i in range(1, 10))
-                            ):
-                                full_text += f"\n{row_text}\n"
-                            else:
-                                full_text += f" {row_text}\n"
+            with pdfplumber.open(file_path) as pdf:
 
-        combined_text = full_text.strip().replace("\r", "")
+                for page_num, page in enumerate(pdf.pages):
 
-        # Remove non-ASCII characters
-        combined_text = (
-            combined_text
-            .encode("ascii", "ignore")
-            .decode("ascii")
-        )
+                    page_text = page.extract_text()
 
-        return combined_text
+                    if page_text:
+                        full_text += page_text + "\n"
 
-    elif file_extension.lower() == ".docx":
-        doc = Document(file_path)
+                    tables = page.extract_tables()
 
-        return "\n".join(
-            [
-                p.text
-                for p in doc.paragraphs
-                if p.text.strip()
-            ]
-        )
+                    if tables:
 
-    else:
-        raise ValueError(
-            f"Unsupported file type: {file_extension}"
-        )
+                        for table in tables:
 
-except Exception as e:
-    st.error(f"Failed to read file: {e}")
-    return ""
+                            for row in table or []:
+
+                                if not row or not any(
+                                    cell and cell.strip()
+                                    for cell in row
+                                ):
+                                    continue
+
+                                row_text = " ".join(
+                                    cell.strip().replace("\n", " ")
+                                    if cell
+                                    else ""
+                                    for cell in row
+                                )
+
+                                if row_text.startswith(
+                                    tuple(f"{i}." for i in range(1, 10))
+                                ):
+                                    full_text += f"\n{row_text}\n"
+
+                                else:
+                                    full_text += f" {row_text}\n"
+
+            combined_text = full_text.strip().replace("\r", "")
+
+            # Remove non-ASCII characters
+            combined_text = (
+                combined_text
+                .encode("ascii", "ignore")
+                .decode("ascii")
+            )
+
+            return combined_text
+
+        elif file_extension.lower() == ".docx":
+
+            doc = Document(file_path)
+
+            return "\n".join(
+                [
+                    p.text
+                    for p in doc.paragraphs
+                    if p.text.strip()
+                ]
+            )
+
+        else:
+
+            raise ValueError(
+                f"Unsupported file type: {file_extension}"
+            )
+
+    except Exception as e:
+
+        st.error(f"Failed to read file: {e}")
+
+        return ""
+
+
+# ============================================================
+# Clean Text
+# ============================================================
 
 def clean_text(text: str) -> str:
-if not text:
-return ""
 
-text = text.replace("–", "-")
-text = text.replace("Page ", "").replace(" of ", "")
+    if not text:
+        return ""
 
-lines = text.split("\n")
+    text = text.replace("–", "-")
+    text = text.replace("Page ", "").replace(" of ", "")
 
-cleaned_lines = [
-    line.strip()
-    for line in lines
-    if line.strip()
-]
+    lines = text.split("\n")
 
-return "\n".join(cleaned_lines)
+    cleaned_lines = [
+        line.strip()
+        for line in lines
+        if line.strip()
+    ]
+
+    return "\n".join(cleaned_lines)
 
 
+# ============================================================
+# Chunk PDF
+# ============================================================
 
 def chunk_pdf(
-file_path: Path | io.BytesIO,
-max_pages=20
+    file_path: Path | io.BytesIO,
+    max_pages=20
 ) -> List[str]:
 
-chunks = []
+    chunks = []
 
-try:
-    with pdfplumber.open(file_path) as pdf:
-        total_pages = len(pdf.pages)
+    try:
 
-        for i in range(0, total_pages, max_pages):
-            chunk_text = ""
+        with pdfplumber.open(file_path) as pdf:
 
-            for page in pdf.pages[i:i + max_pages]:
-                page_text = page.extract_text() or ""
-                chunk_text += page_text + "\n"
+            total_pages = len(pdf.pages)
 
-            chunks.append(clean_text(chunk_text))
+            for i in range(0, total_pages, max_pages):
 
-except Exception as e:
-    st.error(f"Error chunking PDF: {e}")
+                chunk_text = ""
 
-return chunks
+                for page in pdf.pages[i:i + max_pages]:
+
+                    page_text = page.extract_text() or ""
+
+                    chunk_text += page_text + "\n"
+
+                cleaned_chunk = clean_text(chunk_text)
+
+                if cleaned_chunk:
+                    chunks.append(cleaned_chunk)
+
+    except Exception as e:
+
+        st.error(f"Error chunking PDF: {e}")
+
+    return chunks
+
+
+# ============================================================
+# Chunk DOCX
+# ============================================================
 
 def chunk_docx(
-file_path: Path | io.BytesIO,
-max_words=5000
+    file_path: Path | io.BytesIO,
+    max_words=5000
 ) -> List[str]:
 
-chunks = []
-current = []
-word_count = 0
+    chunks = []
 
-try:
-    doc = Document(file_path)
+    current = []
 
-    for para in doc.paragraphs:
-        words = para.text.split()
+    word_count = 0
 
-        if word_count + len(words) > max_words:
-            if current:
-                chunks.append(
-                    clean_text(" ".join(current))
-                )
+    try:
 
-            current = []
-            word_count = 0
+        doc = Document(file_path)
 
-        current.extend(words)
-        word_count += len(words)
+        for para in doc.paragraphs:
 
-    if current:
-        chunks.append(
-            clean_text(" ".join(current))
-        )
+            words = para.text.split()
 
-except Exception as e:
-    st.error(f"Error chunking DOCX: {e}")
+            if word_count + len(words) > max_words:
 
-return chunks
+                if current:
+
+                    chunks.append(
+                        clean_text(" ".join(current))
+                    )
+
+                current = []
+
+                word_count = 0
+
+            current.extend(words)
+
+            word_count += len(words)
+
+        if current:
+
+            chunks.append(
+                clean_text(" ".join(current))
+            )
+
+    except Exception as e:
+
+        st.error(f"Error chunking DOCX: {e}")
+
+    return chunks
 
 
+# ============================================================
+# Extract JSON From Model Response
+# ============================================================
 
 def extract_json(content: str) -> str:
 
-brace_count = 0
-start_idx = None
-json_content = ""
+    if not content:
+        return ""
 
-for i, char in enumerate(content):
+    brace_count = 0
 
-    if char == "{":
+    start_idx = None
 
-        if brace_count == 0:
-            start_idx = i
+    json_content = ""
 
-        brace_count += 1
+    for i, char in enumerate(content):
 
-    elif char == "}":
+        if char == "{":
 
-        brace_count -= 1
+            if brace_count == 0:
+                start_idx = i
 
-        if (
-            brace_count == 0
-            and start_idx is not None
-        ):
-            json_content = content[
-                start_idx:i + 1
-            ]
-            break
+            brace_count += 1
 
-return json_content or content
+        elif char == "}":
+
+            if brace_count > 0:
+                brace_count -= 1
+
+            if (
+                brace_count == 0
+                and start_idx is not None
+            ):
+
+                json_content = content[
+                    start_idx:i + 1
+                ]
+
+                break
+
+    return json_content or content
 
 
+# ============================================================
+# Extract Tasks
+# ============================================================
 
 def extract_task(
-text: str
+    text: str
 ) -> Dict[str, List[Dict[str, str]]]:
 
-prompt = f"""
-
+    prompt = f"""
 You are an expert federal proposal analyst and
 technical project planner.
 
@@ -291,22 +363,22 @@ Do not include explanations outside the JSON object.
 Return exactly this structure:
 
 {{
-"Tasks": [
-{{
-"Task": "...",
-"Parent Task": "...",
-"Methodology": "...",
-"Tools & Technologies": "...",
-"Task Summary": "..."
-}}
-],
-"Deliverables": [
-{{
-"Deliverable": "...",
-"Parent Task": "...",
-"Description": "..."
-}}
-]
+    "Tasks": [
+        {{
+            "Task": "...",
+            "Parent Task": "...",
+            "Methodology": "...",
+            "Tools & Technologies": "...",
+            "Task Summary": "..."
+        }}
+    ],
+    "Deliverables": [
+        {{
+            "Deliverable": "...",
+            "Parent Task": "...",
+            "Description": "..."
+        }}
+    ]
 }}
 
 Document:
@@ -314,63 +386,106 @@ Document:
 {text}
 """
 
-try:
-
-    response = client.chat.completions.create(
-
-        # ---------- UPDATED MODEL ----------
-        model="liquid/lfm-2.5-2.6b:free",
-
-        messages=[
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
-
-        temperature=0.2
-    )
-
-    content = (
-        response.choices[0]
-        .message.content
-        .strip()
-    )
-
-    json_content = extract_json(content)
-
     try:
 
-        result = json.loads(json_content)
+        response = client.chat.completions.create(
 
-        result["Tasks"] = [
-            task
-            for task in result.get("Tasks", [])
-            if task.get("Parent Task")
-            != "Unspecified Task"
-        ]
+            model="liquid/lfm-2.5-2.6b:free",
 
-        result["Deliverables"] = [
-            deliverable
-            for deliverable in result.get(
-                "Deliverables", []
-            )
-            if deliverable.get("Parent Task")
-            != "Unspecified Task"
-        ]
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
 
-        return result
-
-    except json.JSONDecodeError as json_error:
-
-        st.error(
-            "Could not parse JSON response from "
-            "Gemma: "
-            f"{json_error}"
+            temperature=0.2
         )
 
-        st.write(
-            f"Failed JSON Content: {json_content}"
+        # Safely retrieve model content
+        message = response.choices[0].message
+
+        content = message.content if message else ""
+
+        if not content:
+
+            st.warning(
+                "The AI model returned an empty response."
+            )
+
+            return {
+                "Tasks": [],
+                "Deliverables": []
+            }
+
+        content = content.strip()
+
+        json_content = extract_json(content)
+
+        try:
+
+            result = json.loads(json_content)
+
+            if not isinstance(result, dict):
+
+                raise ValueError(
+                    "AI response was not a JSON object."
+                )
+
+            # Ensure expected keys exist
+            if "Tasks" not in result:
+                result["Tasks"] = []
+
+            if "Deliverables" not in result:
+                result["Deliverables"] = []
+
+            # Remove unspecified parent tasks
+            result["Tasks"] = [
+                task
+                for task in result.get("Tasks", [])
+                if isinstance(task, dict)
+                and task.get("Parent Task")
+                != "Unspecified Task"
+            ]
+
+            result["Deliverables"] = [
+                deliverable
+                for deliverable in result.get(
+                    "Deliverables",
+                    []
+                )
+                if isinstance(deliverable, dict)
+                and deliverable.get("Parent Task")
+                != "Unspecified Task"
+            ]
+
+            return result
+
+        except json.JSONDecodeError as json_error:
+
+            st.error(
+                "Could not parse JSON response from AI model: "
+                f"{json_error}"
+            )
+
+            st.write(
+                "Failed JSON Content:"
+            )
+
+            st.code(
+                json_content,
+                language="json"
+            )
+
+            return {
+                "Tasks": [],
+                "Deliverables": []
+            }
+
+    except Exception as e:
+
+        st.error(
+            f"Error during AI extraction: {e}"
         )
 
         return {
@@ -378,490 +493,659 @@ try:
             "Deliverables": []
         }
 
-except Exception as e:
 
-    st.error(
-        f"Error during AI extraction: {e}"
-    )
+# ============================================================
+# Process File
+# ============================================================
 
-    return {
+def process_file(
+    file_path: Path | io.BytesIO,
+    file_extension: str
+) -> Dict[str, List[Dict[str, str]]]:
+
+    extracted_results = {
         "Tasks": [],
         "Deliverables": []
     }
 
+    # --------------------------------------------------------
+    # Read and clean complete document
+    # --------------------------------------------------------
 
-
-def process_file(
-file_path: Path | io.BytesIO,
-file_extension: str
-) -> Dict[str, List[Dict[str, str]]]:
-
-extracted_results = {
-    "Tasks": [],
-    "Deliverables": []
-}
-
-full_text = clean_text(
-    read_file(
-        file_path,
-        file_extension
+    full_text = clean_text(
+        read_file(
+            file_path,
+            file_extension
+        )
     )
-)
 
-# ---------- PDF ----------
-if file_extension.lower() == ".pdf":
+    if not full_text:
 
-    with pdfplumber.open(file_path) as pdf:
-        total_pages = len(pdf.pages)
-
-    if total_pages > 40:
-
-        st.info(
-            f"Splitting PDF into chunks "
-            f"({total_pages} pages)..."
+        st.warning(
+            "No text could be extracted from this file."
         )
 
-        chunks = chunk_pdf(file_path)
+        return extracted_results
+
+    # --------------------------------------------------------
+    # PDF
+    # --------------------------------------------------------
+
+    if file_extension.lower() == ".pdf":
+
+        try:
+
+            with pdfplumber.open(file_path) as pdf:
+
+                total_pages = len(pdf.pages)
+
+        except Exception as e:
+
+            st.error(
+                f"Could not determine PDF page count: {e}"
+            )
+
+            return extracted_results
+
+        if total_pages > 40:
+
+            st.info(
+                f"Splitting PDF into chunks "
+                f"({total_pages} pages)..."
+            )
+
+            chunks = chunk_pdf(file_path)
+
+        else:
+
+            chunks = [full_text]
+
+    # --------------------------------------------------------
+    # DOCX
+    # --------------------------------------------------------
+
+    elif file_extension.lower() == ".docx":
+
+        try:
+
+            doc = Document(file_path)
+
+            total_words = sum(
+                len(p.text.split())
+                for p in doc.paragraphs
+            )
+
+        except Exception as e:
+
+            st.error(
+                f"Could not read DOCX: {e}"
+            )
+
+            return extracted_results
+
+        if total_words > 20000:
+
+            st.info(
+                f"Splitting DOCX into chunks "
+                f"(~{total_words} words)..."
+            )
+
+            chunks = chunk_docx(file_path)
+
+        else:
+
+            chunks = [full_text]
+
+    # --------------------------------------------------------
+    # TXT
+    # --------------------------------------------------------
 
     else:
+
         chunks = [full_text]
 
-# ---------- DOCX ----------
-elif file_extension.lower() == ".docx":
+    # Remove empty chunks
+    chunks = [
+        chunk
+        for chunk in chunks
+        if chunk and chunk.strip()
+    ]
 
-    doc = Document(file_path)
+    if not chunks:
 
-    total_words = sum(
-        len(p.text.split())
-        for p in doc.paragraphs
-    )
+        st.warning(
+            "No usable text chunks were created."
+        )
 
-    if total_words > 20000:
+        return extracted_results
+
+    # --------------------------------------------------------
+    # Process Chunks
+    # --------------------------------------------------------
+
+    for i, chunk in enumerate(chunks, 1):
 
         st.info(
-            f"Splitting DOCX into chunks "
-            f"(~{total_words} words)..."
+            f"Extracting chunk "
+            f"{i}/{len(chunks)}..."
         )
 
-        chunks = chunk_docx(file_path)
+        chunk_result = extract_task(chunk)
 
-    else:
-        chunks = [full_text]
+        if not isinstance(chunk_result, dict):
 
-# ---------- TXT ----------
-else:
-    chunks = [full_text]
+            continue
 
-# ---------- Process Chunks ----------
-for i, chunk in enumerate(chunks, 1):
-
-    st.info(
-        f"Extracting chunk "
-        f"{i}/{len(chunks)}..."
-    )
-
-    chunk_result = extract_task(chunk)
-
-    extracted_results["Tasks"].extend(
-        chunk_result.get("Tasks", [])
-    )
-
-    extracted_results["Deliverables"].extend(
-        chunk_result.get("Deliverables", [])
-    )
-
-# ---------- Consolidate Tasks ----------
-consolidated_tasks = {}
-
-for task in extracted_results["Tasks"]:
-
-    task_key = (
-        task.get("Task", ""),
-        task.get("Parent Task", "")
-    )
-
-    if task_key not in consolidated_tasks:
-
-        consolidated_tasks[task_key] = task
-
-    else:
-
-        existing_summary = consolidated_tasks[
-            task_key
-        ].get("Task Summary", "")
-
-        new_summary = task.get(
-            "Task Summary",
-            ""
+        extracted_results["Tasks"].extend(
+            chunk_result.get("Tasks", [])
         )
 
-        consolidated_tasks[
-            task_key
-        ]["Task Summary"] = (
-            existing_summary
-            + " "
-            + new_summary
+        extracted_results["Deliverables"].extend(
+            chunk_result.get("Deliverables", [])
         )
 
-# ---------- Consolidate Deliverables ----------
-consolidated_deliverables = {}
+    # --------------------------------------------------------
+    # Consolidate Tasks
+    # --------------------------------------------------------
 
-for deliverable in extracted_results[
-    "Deliverables"
-]:
+    consolidated_tasks = {}
 
-    deliv_key = (
-        deliverable.get(
-            "Deliverable",
-            ""
-        ),
-        deliverable.get(
-            "Parent Task",
-            ""
+    for task in extracted_results["Tasks"]:
+
+        if not isinstance(task, dict):
+            continue
+
+        task_key = (
+            task.get("Task", "").strip(),
+            task.get("Parent Task", "").strip()
         )
-    )
 
-    if deliv_key not in consolidated_deliverables:
+        if task_key not in consolidated_tasks:
 
-        consolidated_deliverables[
-            deliv_key
-        ] = deliverable
+            consolidated_tasks[task_key] = task
 
-    else:
+        else:
 
-        existing_description = (
+            existing_summary = (
+                consolidated_tasks[
+                    task_key
+                ].get(
+                    "Task Summary",
+                    ""
+                )
+            )
+
+            new_summary = task.get(
+                "Task Summary",
+                ""
+            )
+
+            if new_summary:
+
+                consolidated_tasks[
+                    task_key
+                ]["Task Summary"] = (
+                    existing_summary
+                    + " "
+                    + new_summary
+                ).strip()
+
+    # --------------------------------------------------------
+    # Consolidate Deliverables
+    # --------------------------------------------------------
+
+    consolidated_deliverables = {}
+
+    for deliverable in extracted_results[
+        "Deliverables"
+    ]:
+
+        if not isinstance(deliverable, dict):
+            continue
+
+        deliv_key = (
+            deliverable.get(
+                "Deliverable",
+                ""
+            ).strip(),
+
+            deliverable.get(
+                "Parent Task",
+                ""
+            ).strip()
+        )
+
+        if deliv_key not in consolidated_deliverables:
+
             consolidated_deliverables[
                 deliv_key
-            ].get(
+            ] = deliverable
+
+        else:
+
+            existing_description = (
+                consolidated_deliverables[
+                    deliv_key
+                ].get(
+                    "Description",
+                    ""
+                )
+            )
+
+            new_description = deliverable.get(
                 "Description",
                 ""
             )
-        )
 
-        new_description = deliverable.get(
-            "Description",
-            ""
-        )
+            if new_description:
 
-        consolidated_deliverables[
-            deliv_key
-        ]["Description"] = (
-            existing_description
-            + " "
-            + new_description
-        )
+                consolidated_deliverables[
+                    deliv_key
+                ]["Description"] = (
+                    existing_description
+                    + " "
+                    + new_description
+                ).strip()
 
-extracted_results["Tasks"] = list(
-    consolidated_tasks.values()
-)
+    # --------------------------------------------------------
+    # Return Consolidated Results
+    # --------------------------------------------------------
 
-extracted_results["Deliverables"] = list(
-    consolidated_deliverables.values()
-)
+    extracted_results["Tasks"] = list(
+        consolidated_tasks.values()
+    )
 
-return extracted_results
+    extracted_results["Deliverables"] = list(
+        consolidated_deliverables.values()
+    )
+
+    return extracted_results
 
 
+# ============================================================
+# Streamlit UI
+# ============================================================
 
 st.title(
-"Sara: Software Automation for Requirement Analysis"
+    "Sara: Software Automation for Requirement Analysis"
 )
 
 st.write(
-"Upload one or more solicitation documents "
-"(TXT, PDF, or DOCX) to extract tasks and deliverables."
+    "Upload one or more solicitation documents "
+    "(TXT, PDF, or DOCX) to extract tasks and deliverables."
 )
 
 
+# ============================================================
+# File Uploader
+# ============================================================
 
 uploaded_files = st.file_uploader(
-"Choose files",
-type=["txt", "pdf", "docx"],
-accept_multiple_files=True
+    "Choose files",
+    type=["txt", "pdf", "docx"],
+    accept_multiple_files=True
 )
+
+
+# ============================================================
+# Process Uploaded Files
+# ============================================================
 
 if uploaded_files:
 
-temp_dir = Path("temp")
-temp_dir.mkdir(exist_ok=True)
+    temp_dir = Path("temp")
 
-all_tasks = []
-all_deliverables = []
+    temp_dir.mkdir(exist_ok=True)
 
-start_time = time.time()
+    all_tasks = []
 
-# ---------- Process Each File ----------
-for uploaded_file in uploaded_files:
+    all_deliverables = []
 
-    st.write(
-        f"Processing {uploaded_file.name}..."
-    )
+    start_time = time.time()
 
-    file_extension = (
-        f".{uploaded_file.name.split('.')[-1]}"
-    )
+    # --------------------------------------------------------
+    # Process Each File
+    # --------------------------------------------------------
 
-    temp_file_path = (
-        temp_dir / uploaded_file.name
-    )
-
-    # Save uploaded file temporarily
-    with open(
-        temp_file_path,
-        "wb"
-    ) as f:
-
-        f.write(
-            uploaded_file.getbuffer()
-        )
-
-    # Process file
-    extracted = process_file(
-        temp_file_path,
-        file_extension
-    )
-
-    # ---------- Add Source File ----------
-    for task in extracted["Tasks"]:
-        task["Source File"] = (
-            uploaded_file.name
-        )
-
-    for deliverable in extracted[
-        "Deliverables"
-    ]:
-        deliverable["Source File"] = (
-            uploaded_file.name
-        )
-
-    # Append to aggregated results
-    all_tasks.extend(
-        extracted["Tasks"]
-    )
-
-    all_deliverables.extend(
-        extracted["Deliverables"]
-    )
-
-    # ---------- Display Tasks ----------
-    st.subheader(
-        f"Results for {uploaded_file.name}"
-    )
-
-    if extracted["Tasks"]:
+    for uploaded_file in uploaded_files:
 
         st.write(
-            "**Extracted Tasks**"
+            f"Processing {uploaded_file.name}..."
         )
 
-        tasks_df = pd.DataFrame(
+        file_extension = (
+            f".{uploaded_file.name.split('.')[-1].lower()}"
+        )
+
+        temp_file_path = (
+            temp_dir / uploaded_file.name
+        )
+
+        # ----------------------------------------------------
+        # Save Uploaded File Temporarily
+        # ----------------------------------------------------
+
+        try:
+
+            with open(
+                temp_file_path,
+                "wb"
+            ) as f:
+
+                f.write(
+                    uploaded_file.getbuffer()
+                )
+
+        except Exception as e:
+
+            st.error(
+                f"Could not save "
+                f"{uploaded_file.name}: {e}"
+            )
+
+            continue
+
+        # ----------------------------------------------------
+        # Process File
+        # ----------------------------------------------------
+
+        try:
+
+            extracted = process_file(
+                temp_file_path,
+                file_extension
+            )
+
+        except Exception as e:
+
+            st.error(
+                f"Error processing "
+                f"{uploaded_file.name}: {e}"
+            )
+
+            extracted = {
+                "Tasks": [],
+                "Deliverables": []
+            }
+
+        # ----------------------------------------------------
+        # Add Source File
+        # ----------------------------------------------------
+
+        for task in extracted["Tasks"]:
+
+            task["Source File"] = (
+                uploaded_file.name
+            )
+
+        for deliverable in extracted[
+            "Deliverables"
+        ]:
+
+            deliverable["Source File"] = (
+                uploaded_file.name
+            )
+
+        # ----------------------------------------------------
+        # Append to Aggregated Results
+        # ----------------------------------------------------
+
+        all_tasks.extend(
             extracted["Tasks"]
         )
 
-        st.dataframe(
-            tasks_df,
-            use_container_width=True
-        )
-
-        # Excel download
-        tasks_excel = io.BytesIO()
-
-        tasks_df.to_excel(
-            tasks_excel,
-            index=False
-        )
-
-        tasks_excel.seek(0)
-
-        st.download_button(
-            label=(
-                f"Download Tasks for "
-                f"{uploaded_file.name} "
-                f"as Excel"
-            ),
-
-            data=tasks_excel,
-
-            file_name=(
-                f"{uploaded_file.name.split('.')[0]}"
-                "_tasks.xlsx"
-            ),
-
-            mime=(
-                "application/vnd.openxmlformats-"
-                "officedocument.spreadsheetml.sheet"
-            )
-        )
-
-    else:
-
-        st.warning(
-            f"No tasks extracted from "
-            f"{uploaded_file.name}."
-        )
-
-    # ---------- Display Deliverables ----------
-    if extracted["Deliverables"]:
-
-        st.write(
-            "**Extracted Deliverables**"
-        )
-
-        deliverables_df = pd.DataFrame(
+        all_deliverables.extend(
             extracted["Deliverables"]
         )
 
-        st.dataframe(
-            deliverables_df,
-            use_container_width=True
+        # ====================================================
+        # Display Results for Current File
+        # ====================================================
+
+        st.subheader(
+            f"Results for {uploaded_file.name}"
         )
 
-        # Excel download
-        deliverables_excel = io.BytesIO()
+        # ----------------------------------------------------
+        # Display Tasks
+        # ----------------------------------------------------
 
-        deliverables_df.to_excel(
-            deliverables_excel,
-            index=False
-        )
+        if extracted["Tasks"]:
 
-        deliverables_excel.seek(0)
-
-        st.download_button(
-            label=(
-                f"Download Deliverables for "
-                f"{uploaded_file.name} "
-                f"as Excel"
-            ),
-
-            data=deliverables_excel,
-
-            file_name=(
-                f"{uploaded_file.name.split('.')[0]}"
-                "_deliverables.xlsx"
-            ),
-
-            mime=(
-                "application/vnd.openxmlformats-"
-                "officedocument.spreadsheetml.sheet"
+            st.write(
+                "**Extracted Tasks**"
             )
+
+            tasks_df = pd.DataFrame(
+                extracted["Tasks"]
+            )
+
+            st.dataframe(
+                tasks_df,
+                use_container_width=True
+            )
+
+            # Excel download
+            tasks_excel = io.BytesIO()
+
+            tasks_df.to_excel(
+                tasks_excel,
+                index=False
+            )
+
+            tasks_excel.seek(0)
+
+            st.download_button(
+                label=(
+                    f"Download Tasks for "
+                    f"{uploaded_file.name} "
+                    f"as Excel"
+                ),
+
+                data=tasks_excel,
+
+                file_name=(
+                    f"{Path(uploaded_file.name).stem}"
+                    "_tasks.xlsx"
+                ),
+
+                mime=(
+                    "application/vnd.openxmlformats-"
+                    "officedocument.spreadsheetml.sheet"
+                )
+            )
+
+        else:
+
+            st.warning(
+                f"No tasks extracted from "
+                f"{uploaded_file.name}."
+            )
+
+        # ----------------------------------------------------
+        # Display Deliverables
+        # ----------------------------------------------------
+
+        if extracted["Deliverables"]:
+
+            st.write(
+                "**Extracted Deliverables**"
+            )
+
+            deliverables_df = pd.DataFrame(
+                extracted["Deliverables"]
+            )
+
+            st.dataframe(
+                deliverables_df,
+                use_container_width=True
+            )
+
+            # Excel download
+            deliverables_excel = io.BytesIO()
+
+            deliverables_df.to_excel(
+                deliverables_excel,
+                index=False
+            )
+
+            deliverables_excel.seek(0)
+
+            st.download_button(
+                label=(
+                    f"Download Deliverables for "
+                    f"{uploaded_file.name} "
+                    f"as Excel"
+                ),
+
+                data=deliverables_excel,
+
+                file_name=(
+                    f"{Path(uploaded_file.name).stem}"
+                    "_deliverables.xlsx"
+                ),
+
+                mime=(
+                    "application/vnd.openxmlformats-"
+                    "officedocument.spreadsheetml.sheet"
+                )
+            )
+
+        else:
+
+            st.warning(
+                f"No deliverables extracted from "
+                f"{uploaded_file.name}."
+            )
+
+        # ----------------------------------------------------
+        # Clean Up Temporary File
+        # ----------------------------------------------------
+
+        try:
+
+            os.remove(temp_file_path)
+
+        except OSError:
+
+            pass
+
+    # ========================================================
+    # Aggregated Results
+    # ========================================================
+
+    if all_tasks or all_deliverables:
+
+        st.subheader(
+            "Aggregated Results Across All Files"
         )
 
-    else:
+        # ----------------------------------------------------
+        # All Tasks
+        # ----------------------------------------------------
 
-        st.warning(
-            f"No deliverables extracted from "
-            f"{uploaded_file.name}."
-        )
+        if all_tasks:
 
-    # ---------- Clean Up ----------
-    try:
-        os.remove(temp_file_path)
-    except OSError:
-        pass
+            st.write(
+                "**All Extracted Tasks**"
+            )
 
-# ---------- Aggregated Results ----------
-if all_tasks or all_deliverables:
+            all_tasks_df = pd.DataFrame(
+                all_tasks
+            )
 
-    st.subheader(
-        "Aggregated Results Across All Files"
+            st.dataframe(
+                all_tasks_df,
+                use_container_width=True
+            )
+
+            tasks_excel = io.BytesIO()
+
+            all_tasks_df.to_excel(
+                tasks_excel,
+                index=False
+            )
+
+            tasks_excel.seek(0)
+
+            st.download_button(
+                label="Download All Tasks as Excel",
+
+                data=tasks_excel,
+
+                file_name="all_tasks.xlsx",
+
+                mime=(
+                    "application/vnd.openxmlformats-"
+                    "officedocument.spreadsheetml.sheet"
+                )
+            )
+
+        # ----------------------------------------------------
+        # All Deliverables
+        # ----------------------------------------------------
+
+        if all_deliverables:
+
+            st.write(
+                "**All Extracted Deliverables**"
+            )
+
+            all_deliverables_df = pd.DataFrame(
+                all_deliverables
+            )
+
+            st.dataframe(
+                all_deliverables_df,
+                use_container_width=True
+            )
+
+            deliverables_excel = io.BytesIO()
+
+            all_deliverables_df.to_excel(
+                deliverables_excel,
+                index=False
+            )
+
+            deliverables_excel.seek(0)
+
+            st.download_button(
+                label=(
+                    "Download All Deliverables "
+                    "as Excel"
+                ),
+
+                data=deliverables_excel,
+
+                file_name="all_deliverables.xlsx",
+
+                mime=(
+                    "application/vnd.openxmlformats-"
+                    "officedocument.spreadsheetml.sheet"
+                )
+            )
+
+    # ========================================================
+    # Processing Time
+    # ========================================================
+
+    end_time = time.time()
+
+    elapsed = round(
+        end_time - start_time,
+        2
     )
 
-    # ---------- All Tasks ----------
-    if all_tasks:
-
-        st.write(
-            "**All Extracted Tasks**"
-        )
-
-        all_tasks_df = pd.DataFrame(
-            all_tasks
-        )
-
-        st.dataframe(
-            all_tasks_df,
-            use_container_width=True
-        )
-
-        tasks_excel = io.BytesIO()
-
-        all_tasks_df.to_excel(
-            tasks_excel,
-            index=False
-        )
-
-        tasks_excel.seek(0)
-
-        st.download_button(
-            label="Download All Tasks as Excel",
-
-            data=tasks_excel,
-
-            file_name="all_tasks.xlsx",
-
-            mime=(
-                "application/vnd.openxmlformats-"
-                "officedocument.spreadsheetml.sheet"
-            )
-        )
-
-    # ---------- All Deliverables ----------
-    if all_deliverables:
-
-        st.write(
-            "**All Extracted Deliverables**"
-        )
-
-        all_deliverables_df = pd.DataFrame(
-            all_deliverables
-        )
-
-        st.dataframe(
-            all_deliverables_df,
-            use_container_width=True
-        )
-
-        deliverables_excel = io.BytesIO()
-
-        all_deliverables_df.to_excel(
-            deliverables_excel,
-            index=False
-        )
-
-        deliverables_excel.seek(0)
-
-        st.download_button(
-            label=(
-                "Download All Deliverables "
-                "as Excel"
-            ),
-
-            data=deliverables_excel,
-
-            file_name="all_deliverables.xlsx",
-
-            mime=(
-                "application/vnd.openxmlformats-"
-                "officedocument.spreadsheetml.sheet"
-            )
-        )
-
-# ---------- Processing Time ----------
-end_time = time.time()
-
-elapsed = round(
-    end_time - start_time,
-    2
-)
-
-st.success(
-    f"Finished processing "
-    f"{len(uploaded_files)} file(s) "
-    f"in {elapsed} seconds."
-)
+    st.success(
+        f"Finished processing "
+        f"{len(uploaded_files)} file(s) "
+        f"in {elapsed} seconds."
+    )
 
 else:
 
-st.info(
-    "Please upload one or more files "
-    "to begin processing."
-)
+    st.info(
+        "Please upload one or more files "
+        "to begin processing."
+    )
+```
